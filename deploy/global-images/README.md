@@ -59,6 +59,7 @@ cd TencentDB-Agent-Memory/deploy/global-images
 `verify.sh` 默认会预检两组 LLM 通路（`--skip-llm` 关掉）：
 
 - **OpenAI 兼容协议**：`GET {base}/models`，只验证 API key + URL，**不消耗任何 token**
+- **OpenAI Responses 协议**：`POST {base}/responses` 发最小请求，验证 API key + URL + 模型
 - **Anthropic 协议**：`POST {base}/v1/messages` 发 `max_tokens=1` 的最小消息，消耗 ≤ 10 token
 - **memory 组** 与 **proxy 组** 独立验；若两组配置完全相同，自动跳过重复检查
 - **容器已运行时**，额外从容器内 exec 一次 curl，验证"容器 → LLM"的网络可达性（一些企业代理/DNS 隔离环境下宿主机可达但容器不可达）
@@ -93,7 +94,7 @@ cd TencentDB-Agent-Memory/deploy/global-images
 | `MEMORY_LLM_BASE_URL` | OpenAI 兼容 base URL | `https://api.deepseek.com/v1` |
 | `MEMORY_LLM_API_KEY` | 上述端点的 API Key | `sk-xxxxxxxx` |
 | `MEMORY_LLM_MODEL` | 模型 ID | `deepseek-chat` |
-| `MEMORY_LLM_PROTOCOL` | `openai` 或 `anthropic`，默认 `openai` | `openai` |
+| `MEMORY_LLM_PROTOCOL` | `openai`、`responses` 或 `anthropic`，默认 `openai` | `openai` |
 
 ### proxy 组（proxy 使用）
 

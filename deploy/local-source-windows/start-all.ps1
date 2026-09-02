@@ -133,6 +133,7 @@ try {
             TDAI_LLM_BASE_URL = (Get-EnvValue 'MEMORY_LLM_BASE_URL')
             TDAI_LLM_API_KEY = (Get-EnvValue 'MEMORY_LLM_API_KEY')
             TDAI_LLM_MODEL = (Get-EnvValue 'MEMORY_LLM_MODEL')
+            TDAI_LLM_PROTOCOL = (Get-EnvValue 'MEMORY_LLM_PROTOCOL' 'openai')
         }
     Wait-SourceService 'memory-core' $coreProcess "$coreUrl/health" 90
 

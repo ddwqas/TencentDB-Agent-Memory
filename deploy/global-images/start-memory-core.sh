@@ -68,6 +68,7 @@ llm:
   baseUrl: "${MEMORY_LLM_BASE_URL:-}"
   apiKey: "${MEMORY_LLM_API_KEY:-}"
   model: "${MEMORY_LLM_MODEL:-}"
+  protocol: ${MEMORY_LLM_PROTOCOL:-openai}
   maxTokens: 32000
   timeoutMs: 300000
 

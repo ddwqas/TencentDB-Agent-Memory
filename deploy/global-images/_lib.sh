@@ -197,6 +197,44 @@ check_llm_openai() {
   return $rc
 }
 
+# check_llm_responses <label> <base_url> <api_key> <model>
+#   OpenAI Responses：POST {base}/responses 发最小请求，验证 URL、鉴权和模型。
+check_llm_responses() {
+  local label="$1" base="$2" key="$3" model="$4"
+  base="${base%/}"
+  base="${base%/responses}"
+  local url="${base}/responses" body_file=/tmp/llm-check.$$
+  local code
+  code=$("$CURL" -sS --max-time 15 -o "$body_file" -w "%{http_code}" \
+    -X POST -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $key" \
+    -d "{\"model\":\"$model\",\"input\":\"ping\",\"max_output_tokens\":1}" \
+    "$url" 2>/dev/null || echo "000")
+  local rc=0
+  case "$code" in
+    200) ok "$label Responses 协议通路 OK（模型 $model 已应答）" ;;
+    401|403)
+      warn "$label API key 无效（HTTP ${code}）：$url"
+      head -c 200 "$body_file" >&2; echo >&2
+      rc=1 ;;
+    404)
+      warn "$label Responses URL 不存在（HTTP 404）：$url —— 检查 BASE_URL"
+      rc=1 ;;
+    400)
+      if grep -qE "model.*not.*found|invalid.*model|model_not_found" "$body_file" 2>/dev/null; then
+        warn "$label 模型名 '$model' 无效（HTTP 400）"
+        rc=1
+      else
+        warn "$label Responses HTTP 400（可能是上游参数限制，通路已到达）：$(head -c 150 "$body_file")"
+      fi ;;
+    *)
+      warn "$label 无法访问 ${url}（HTTP=${code}）$(head -c 100 "$body_file" 2>/dev/null)"
+      rc=1 ;;
+  esac
+  rm -f "$body_file"
+  return $rc
+}
+
 # check_llm_anthropic <label> <base_url> <api_key> <model>
 #   Anthropic：POST {base}/v1/messages 发 max_tokens=1，消耗 ≤ 10 token。返回 0/1。
 check_llm_anthropic() {
@@ -249,6 +287,7 @@ check_llm_group() {
   info "检查 $label 通路（协议=${proto}）..."
   case "$proto" in
     anthropic) check_llm_anthropic "$label" "$base" "$key" "$model" ;;
+    responses) check_llm_responses "$label" "$base" "$key" "$model" ;;
     *)         check_llm_openai    "$label" "$base" "$key" "$model" ;;
   esac
 }
@@ -277,15 +316,15 @@ prompt_with_default() {
 }
 
 # prompt_protocol <default>
-#   让用户确认 LLM 协议（openai/anthropic），非法输入回退 openai。
+#   让用户确认 LLM 协议（openai/responses/anthropic），非法输入回退 openai。
 prompt_protocol() {
   local default="${1:-openai}"
-  printf 'memory 组 LLM 协议（openai/anthropic）[%s]: ' "$default" >&2
+  printf 'memory 组 LLM 协议（openai/responses/anthropic）[%s]: ' "$default" >&2
   local input
   IFS= read -r input || { printf '\n' >&2; printf '%s' "$default"; return 0; }
   input="${input:-$default}"
   case "$input" in
-    openai|anthropic) printf '%s' "$input" ;;
+    openai|responses|anthropic) printf '%s' "$input" ;;
     *) warn "未知协议 '$input'，回退到 openai"; printf 'openai' ;;
   esac
 }
