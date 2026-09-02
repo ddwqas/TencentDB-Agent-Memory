@@ -12,7 +12,7 @@
  *   lib 层 cascadeDeleteWikiPagesWithRefs 做引用级联。
  */
 
-import { join, resolve, normalize } from "node:path";
+import { join, resolve, normalize, sep } from "node:path";
 import {
   rmSync,
   mkdirSync,
@@ -909,7 +909,7 @@ export class WikiService {
     // （如 KNOWLEDGE_DATA_DIR=./data）与 resolve 出来的绝对路径比较失败。
     const base = resolve(sourcesDir);
     const safe = resolve(base, normalized);
-    const dirWithSep = base.endsWith("/") ? base : base + "/";
+    const dirWithSep = base.endsWith(sep) ? base : base + sep;
     if (safe !== base && !safe.startsWith(dirWithSep)) return null;
     return safe;
   }
@@ -930,7 +930,7 @@ export class WikiService {
 
     // resolve 成绝对路径，避免 projectPath 是相对路径时比较失败。
     const wikiDir = resolve(projectPath, "wiki");
-    const wikiDirSep = wikiDir.endsWith("/") ? wikiDir : wikiDir + "/";
+    const wikiDirSep = wikiDir.endsWith(sep) ? wikiDir : wikiDir + sep;
 
     // 先按原样尝试，再尝试补 .md 扩展。
     const candidates = cleanRef.endsWith(".md") ? [cleanRef] : [cleanRef + ".md", cleanRef];
@@ -955,9 +955,9 @@ export class WikiService {
   /** 把 wiki/.../page.md 绝对路径转换回 ref（如 "concepts/redis"）。 */
   private absToPageRef(projectPath: string, abs: string): string {
     const wikiDir = resolve(projectPath, "wiki");
-    const prefix = wikiDir.endsWith("/") ? wikiDir : wikiDir + "/";
+    const prefix = wikiDir.endsWith(sep) ? wikiDir : wikiDir + sep;
     if (!abs.startsWith(prefix)) return abs;
-    return abs.slice(prefix.length).replace(/\.md$/, "");
+    return abs.slice(prefix.length).replace(/\\/g, "/").replace(/\.md$/, "");
   }
 
   private isForbiddenPageRef(ref: string): boolean {

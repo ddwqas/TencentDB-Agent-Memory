@@ -31,7 +31,7 @@ export interface MemCommandContext {
    * 当前请求的最近对话消息（用于 task-draft-generator 生成草稿）。
    *
    * - CC/CB 走 chat/completions：直接是 body.messages[]
-   * - Codex/WorkBuddy 走 Responses API：目前传空数组（阶段 5 联调时再补 body.input 解析）
+   * - Codex/WorkBuddy 走 Responses API：由 handler 从 body.input[] 提取为同一格式
    *
    * 未提供时视为空数组，task 命令族会返 "no recent messages" 错误。
    */

@@ -54,6 +54,7 @@ import { trackWrite, withL0Retry } from "./tdai/pending-writes.js";
 import type { TdaiIdentity, TdaiMessage } from "./tdai/types.js";
 import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
+import { recordInputTokenUsage } from "./rate-limit/guard.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -341,7 +342,7 @@ export async function handleCodexEndpoint(
   if (isAuxiliary) {
     pipe.info("CODEX_AUX", `auxiliary request → passthrough (path=${path})`);
     // aux 不上报 langfuse（跟 CC/CB 对齐——sidequery/fork 类 aux 不算真对话轮）
-    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null);
+    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, null, true);
   }
 
   // ── 6. Session ID extraction ───────────────────────────────────────────────
@@ -931,7 +932,7 @@ export async function handleCodexEndpoint(
   });
 
   // ── 11. Forward to upstream ────────────────────────────────────────────────
-  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, archiveCtx);
+  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, archiveCtx, body.stream === false);
 }
 
 // ── Archive context (skill/conversation/add + TDAI L0 write) ─────────────────
@@ -1075,6 +1076,7 @@ async function forwardToUpstream(
   pipe: ReturnType<typeof createPipeline>,
   lf: LangfuseTurnContext | null,
   archiveCtx: CodexArchiveCtx | null = null,
+  captureUsage = false,
 ): Promise<Response> {
   // Per-agent upstream override (upstream.agents.codex.url) 优先于全局 url。
   // 对齐 anthropicHandler.ts:1029 的解析姿势。codex 通常需要单独指向支持
@@ -1138,12 +1140,11 @@ async function forwardToUpstream(
     keyId,
     sessionKey: keyId,
     upstreamUrl,
-    stream: true,
-    traceId,
+    stream: body.stream !== false,
   });
 
   // ── 上游 4xx/5xx：拷贝一份 body 文本用于 langfuse 错误上报；成功则 tap ──
-  // codex Responses API 只有 SSE 流式响应，不区分 stream / non-stream 处理。
+  // Responses API 可返回 SSE 或 JSON；下方按 content-type 分流并保持原响应。
   if (upstreamResp.status >= 400) {
     // 4xx/5xx 通常返 JSON error（很小），完整读出来带进 langfuse 便于排查
     const errText = await upstreamResp.text();
@@ -1170,10 +1171,103 @@ async function forwardToUpstream(
     });
   }
 
-  // 2xx: aux 场景 (lf=null && archiveCtx=null) 直接透传不 tap; 主对话场景 tap
-  // 一份用于 langfuse 上报 + skill/L0 归档 hook (P1-P2 gap 修复)。
-  // 只要有 lf 或 archiveCtx 任一非空就必须 tee 一份 tap 流。
-  const needTap = Boolean(lf) || Boolean(archiveCtx);
+  const contentType = upstreamResp.headers.get("content-type") ?? "";
+  const isSSE = contentType.includes("text/event-stream");
+  if (!isSSE && upstreamResp.body && (captureUsage || lf || archiveCtx)) {
+    const raw = await upstreamResp.text();
+    let usage: Record<string, unknown> | undefined;
+    let assistantText = "";
+    let toolUseCount = 0;
+    try {
+      const payload = JSON.parse(raw) as Record<string, unknown>;
+      if (payload.usage && typeof payload.usage === "object") {
+        usage = payload.usage as Record<string, unknown>;
+      }
+      const hasOutputText = typeof payload.output_text === "string";
+      if (hasOutputText) {
+        assistantText = payload.output_text;
+      }
+      if (Array.isArray(payload.output)) {
+        for (const item of payload.output as Array<Record<string, unknown>>) {
+          if (item?.type === "function_call") toolUseCount++;
+          if (hasOutputText || item?.type !== "message" || !Array.isArray(item.content)) continue;
+          for (const part of item.content as Array<Record<string, unknown>>) {
+            if ((part?.type === "output_text" || part?.type === "text") && typeof part.text === "string") {
+              assistantText += part.text;
+            }
+          }
+        }
+      }
+    } catch {
+      // Preserve the original non-JSON Responses payload unchanged.
+    }
+    if (usage && Object.keys(usage).length > 0) {
+      await recordInputTokenUsage({
+        config,
+        instanceId: extractSpaceIdFromPath(c.req.path) ?? undefined,
+        modelId,
+        usage,
+        protocol: "responses",
+      });
+      try {
+        writeLog(config, {
+          timestamp: new Date().toISOString(),
+          event: "usage",
+          modelId,
+          keyId,
+          sessionKey: lf?.sessionId ?? keyId,
+          turnSeq: lf?.turnSeq,
+          userInput: lf?.userQuery || undefined,
+          upstreamUrl,
+          stream: false,
+          usage,
+          spaceId: extractSpaceIdFromPath(c.req.path) ?? undefined,
+        });
+      } catch (logErr: unknown) {
+        pipe.error("LOG_WRITE", logErr);
+      }
+    }
+    const endTime = new Date().toISOString();
+    if (lf) {
+      try {
+        langfuseReportGeneration({
+          traceId: lf.traceId,
+          name: modelId,
+          model: modelId,
+          startTime,
+          endTime,
+          input: buildCodexLangfuseInput(body),
+          output: assistantText ? { role: "assistant", content: assistantText } : undefined,
+          usage,
+          traceName: lf.traceName,
+          userId: lf.userId,
+          sessionId: lf.sessionId,
+          tags: lf.tags,
+          traceInput: lf.userQuery || undefined,
+          traceOutput: assistantText || undefined,
+          traceMetadata: { stream: false, upstreamUrl, tool_use_count: toolUseCount },
+          observationMetadata: { stream: false, upstreamUrl, tool_use_count: toolUseCount },
+        });
+      } catch (lfErr: unknown) {
+        pipe.error("LANGFUSE_SPAN", lfErr);
+      }
+    }
+    if (archiveCtx) {
+      try {
+        await triggerCodexArchiveHooks(archiveCtx, assistantText, toolUseCount);
+      } catch (archiveErr: unknown) {
+        pipe.error("CODEX_ARCHIVE", archiveErr instanceof Error ? archiveErr : new Error(String(archiveErr)));
+      }
+    }
+    return new Response(raw, {
+      status: upstreamResp.status,
+      headers: filterResponseHeaders(upstreamResp.headers),
+    });
+  }
+
+  // 2xx: 主对话场景 tap 一份用于 Langfuse + skill/L0 归档；aux 场景只
+  // tap 用量，避免 Responses 的 response.completed usage 丢失。
+  const needTap = Boolean(lf) || Boolean(archiveCtx) || captureUsage;
   if (!needTap || !upstreamResp.body) {
     return new Response(upstreamResp.body, {
       status: upstreamResp.status,
@@ -1184,6 +1278,9 @@ async function forwardToUpstream(
   const [rawClientStream, tapStream] = upstreamResp.body.tee();
   consumeCodexStream(tapStream, {
     lf,
+    config,
+    keyId,
+    spaceId: extractSpaceIdFromPath(c.req.path) ?? undefined,
     modelId,
     startTime,
     upstreamUrl,
@@ -1234,10 +1331,13 @@ function buildCodexLangfuseInput(body: Record<string, unknown>): unknown {
 
 export interface CodexTapContext {
   /**
-   * langfuse trace context; null 表示 aux 场景不上报 langfuse 但可能仍需
-   * 归档 (理论上 aux 不会带 archiveCtx, 两者同时 null 时上游 tap 干脆不启动)。
+   * langfuse trace context; null 表示 aux 场景不上报 langfuse。aux 的 usage
+   * 仍由 tap 消费，归档上下文为空时不会触发 skill/L0。
    */
   lf: LangfuseTurnContext | null;
+  config: ProxyConfig;
+  keyId: string;
+  spaceId?: string;
   modelId: string;
   startTime: string;
   upstreamUrl: string;
@@ -1261,7 +1361,7 @@ export interface CodexTapContext {
  * 失败静默——埋点绝不影响业务链路。
  */
 export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: CodexTapContext): void {
-  const { lf, modelId, startTime, upstreamUrl, inputBody, pipe, archiveCtx } = ctx;
+  const { lf, config, keyId, spaceId, modelId, startTime, upstreamUrl, inputBody, pipe, archiveCtx } = ctx;
 
   (async () => {
     const decoder = new TextDecoder();
@@ -1285,6 +1385,33 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
       clearTimeout(timeoutHandle);
 
       const endTime = new Date().toISOString();
+      if (Object.keys(usage).length > 0) {
+        await recordInputTokenUsage({
+          config,
+          instanceId: spaceId,
+          modelId,
+          usage,
+          protocol: "responses",
+        });
+        try {
+          writeLog(config, {
+            timestamp: endTime,
+            event: "usage",
+            modelId,
+            keyId,
+            sessionKey: lf?.sessionId ?? keyId,
+            turnSeq: lf?.turnSeq,
+            userInput: lf?.userQuery || undefined,
+            upstreamUrl,
+            stream: true,
+            usage,
+            spaceId,
+          });
+        } catch (logErr: unknown) {
+          pipe.error("LOG_WRITE", logErr);
+        }
+      }
+
       if (lf) {
         try {
           const output = outputText

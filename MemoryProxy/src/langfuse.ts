@@ -240,10 +240,19 @@ function deriveParentSpanId(traceId: string): string {
  */
 export function normalizeUsageDetails(usage: Record<string, unknown>): Record<string, number> {
   const promptDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined;
+  const inputDetails = usage.input_tokens_details as Record<string, unknown> | undefined;
+  const isResponses = !!inputDetails || (
+    "output_tokens" in usage &&
+    !("completion_tokens" in usage) &&
+    !("cache_read_input_tokens" in usage) &&
+    !("cache_creation_input_tokens" in usage) &&
+    !("cache_creation" in usage)
+  );
 
   const cacheRead =
     num(usage.prompt_cache_hit_tokens) ||
     num(usage.cache_read_input_tokens) ||
+    num(inputDetails?.cached_tokens) ||
     num(promptDetails?.cached_tokens);
   const cacheWrite =
     num(usage.prompt_cache_write_tokens) ||
@@ -252,7 +261,8 @@ export function normalizeUsageDetails(usage: Record<string, unknown>): Record<st
   // 总输入（含缓存）：OpenAI/DeepSeek 取 prompt_tokens；
   // Anthropic 无 prompt_tokens，用 input_tokens(已排除 cache) 加回 cache_read + cache_write。
   const inputTokens = num(usage.input_tokens);
-  const promptTokens = num(usage.prompt_tokens) || inputTokens + cacheRead + cacheWrite;
+  // Responses input_tokens 已包含缓存；Anthropic input_tokens 则不含缓存。
+  const promptTokens = num(usage.prompt_tokens) || (isResponses ? inputTokens : inputTokens + cacheRead + cacheWrite);
   const outputTokens = num(usage.completion_tokens) || num(usage.output_tokens);
   // 总 token：优先上游给的 total_tokens，否则 prompt + completion（prompt 已含缓存）。
   const totalTokens = num(usage.total_tokens) || promptTokens + outputTokens;

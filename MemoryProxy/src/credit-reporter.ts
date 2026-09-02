@@ -33,6 +33,7 @@ const MAX_ERROR_HEADER_LEN = 256;
  * Detect usage schema protocol from upstream URL path.
  *
  * - `/v1/messages` (含子路径 `/v1/messages/count_tokens`、`/v1/messages?...`) → "anthropic"
+ * - `/responses` 或 `/v1/responses` → "responses"
  * - 其它路径（包括 `/v1/chat/completions` 与未识别路径） → "openai"
  *
  * 选 openai 作为兜底默认的理由：Anthropic 分支假设 input_tokens 已扣缓存，
@@ -42,10 +43,12 @@ const MAX_ERROR_HEADER_LEN = 256;
  *
  * 大小写不敏感。
  */
-export function detectUsageProtocol(upstreamUrl: string): "anthropic" | "openai" {
+export function detectUsageProtocol(upstreamUrl: string): "anthropic" | "responses" | "openai" {
   const path = upstreamUrl.toLowerCase();
   // /v1/messages 后必须是 / 或 ? 或字符串结尾，避免误匹配 /v1/messages_admin
   if (/\/v1\/messages(\/|\?|$)/.test(path)) return "anthropic";
+  // Responses 上游可能使用 /responses 或 /v1/responses；同样限制边界，避免误匹配。
+  if (/(?:\/v1)?\/responses(\/|\?|$)/.test(path)) return "responses";
   return "openai";
 }
 
@@ -93,6 +96,10 @@ export function extractSpaceIdFromPath(path: string): string | null {
  *   - cacheRead = usage.cache_read_input_tokens
  *   - cacheWrite5m = usage.cache_creation.ephemeral_5m_input_tokens
  *   - cacheWrite1h = usage.cache_creation_input_tokens - ephemeral_5m_input_tokens
+ *
+ * Responses 分支（`/responses` 或 `/v1/responses`）：
+ *   - `input_tokens` 是含缓存的总输入，需减去 `input_tokens_details.cached_tokens`
+ *   - `output_tokens` 是输出；Responses 无 cache write 概念
  *
  * OpenAI 分支（`/v1/chat/completions` 或其它路径）：
  *   - nonCacheInput = max(0, usage.prompt_tokens - cached_tokens)（prompt_tokens 含缓存）
@@ -144,6 +151,15 @@ export function computeCreditDelta(
     const totalCacheWrite = numField(usage.cache_creation_input_tokens);
     cacheWrite5m = ephemeral5m;
     cacheWrite1h = Math.max(0, totalCacheWrite - ephemeral5m);
+  } else if (protocol === "responses") {
+    const inputDetails = usage.input_tokens_details as Record<string, unknown> | undefined;
+    const inputTokens = numField(usage.input_tokens);
+    cacheRead =
+      numField(inputDetails?.cached_tokens) ||
+      numField(usage.cache_read_input_tokens);
+    nonCacheInput = Math.max(0, inputTokens - cacheRead);
+    cacheWrite5m = 0;
+    cacheWrite1h = 0;
   } else {
     // OpenAI: prompt_tokens 含缓存，需减去 cached_tokens
     const promptDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined;

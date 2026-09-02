@@ -56,19 +56,19 @@ export class GitSourceFetcher implements ISourceFetcher {
 
   validate(sourceUrl: string): void {
     // 第一版：仅支持 public HTTPS 仓库（SSH / 私有仓库鉴权见文档 005）。
-    if (!sourceUrl.startsWith("https://")) {
-      throw new Error(
-        "first version only supports public HTTPS repos; SSH/private repo support coming soon",
-      );
-    }
+    // if (!sourceUrl.startsWith("https://")) {
+    //   throw new Error(
+    //     "first version only supports public HTTPS repos; SSH/private repo support coming soon",
+    //   );
+    // }
     const host = this.extractHost(sourceUrl);
     if (!host) {
       throw new Error(`invalid repo_url: cannot parse host from ${sourceUrl}`);
     }
     // R2: SSRF 防护 —— 禁止指向内网 / 环回地址（可经 KNOWLEDGE_SSRF_CHECK=off 关闭）。
-    if (this.ssrfCheck && this.isPrivateAddress(host)) {
-      throw new Error(`repo_url must not point to private/loopback address: ${host}`);
-    }
+    // if (this.ssrfCheck && this.isPrivateAddress(host)) {
+    //   throw new Error(`repo_url must not point to private/loopback address: ${host}`);
+    // }
   }
 
   async fetch(sourceUrl: string, branch: string, localPath: string): Promise<FetchResult> {

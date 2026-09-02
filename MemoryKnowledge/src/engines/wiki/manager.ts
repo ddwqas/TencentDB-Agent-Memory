@@ -10,7 +10,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "fs";
-import { join, basename, relative } from "path";
+import { join, basename, relative, resolve, isAbsolute } from "path";
 import Graph from "graphology";
 import type DatabaseType from "better-sqlite3";
 import pLimit, { type LimitFunction } from "p-limit";
@@ -795,11 +795,44 @@ function findMdFiles(dir: string): string[] {
 export function createWikiSourceManager(dataDir: string): WikiSourceManager {
   const sources = new Map<string, WikiSourceState>();
   const stateFile = join(dataDir, "wiki-sources.json");
+  // The state file lives under this manager directory. Persisting project paths
+  // relative to the Knowledge data root keeps the state portable when the deployment
+  // directory or drive letter changes.
+  const stateRoot = resolve(dataDir);
+  const dataRoot = resolve(stateRoot, "..");
 
   mkdirSync(dataDir, { recursive: true });
 
   function persist() {
-    writeFileSync(stateFile, JSON.stringify(Object.fromEntries(sources.entries()), null, 2), "utf-8");
+    const persisted = Object.fromEntries(
+      [...sources.entries()].map(([name, state]) => [
+        name,
+        {
+          ...state,
+          // Keep an unresolved legacy path intact; if its project is present,
+          // rewrite it relative to the current state root.
+          path: existsSync(state.path)
+            ? relative(dataRoot, state.path).replace(/\\/g, "/") || "."
+            : state.path,
+        },
+      ]),
+    );
+    writeFileSync(stateFile, JSON.stringify(persisted, null, 2), "utf-8");
+  }
+
+  function resolveStoredPath(storedPath: string): string {
+    if (!isAbsolute(storedPath)) return resolve(dataRoot, storedPath);
+    if (existsSync(storedPath)) return storedPath;
+
+    // A legacy absolute path may point to the old deployment root after the
+    // whole deployment directory was moved. The asset layout is always
+    // <dataRoot>/<serviceId>/<teamId>/<assetId>, so recover that stable suffix.
+    const parts = storedPath.replace(/\\/g, "/").split("/").filter(Boolean);
+    if (parts.length >= 3) {
+      const candidate = resolve(dataRoot, ...parts.slice(-3));
+      if (existsSync(candidate)) return candidate;
+    }
+    return storedPath;
   }
 
   function loadState() {
@@ -807,6 +840,10 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     try {
       const raw = JSON.parse(readFileSync(stateFile, "utf-8"));
       for (const [name, state] of Object.entries<any>(raw)) {
+        const storedPath = state.path as string;
+        // New state stores a path relative to _wiki_engines. Older versions
+        // stored an absolute path; keep it working and migrate it on save.
+        state.path = resolveStoredPath(storedPath);
         if (state.status === "scanning") { state.status = "error"; state.error = "Restart"; }
         sources.set(name, state);
       }
@@ -829,8 +866,8 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
       else if (entry.endsWith(".md")) {
         try {
           const content = readFileSync(full, "utf-8");
-          const rel = full.slice(baseDir.length + 1);
-          const id = rel.replace(/\.md$/, "").replace(/\\/g, "/");
+          const rel = full.slice(baseDir.length + 1).replace(/\\/g, "/");
+          const id = rel.replace(/\.md$/, "");
           const fm = extractFrontmatter(content);
           pages.push({ id, title: fm.title || basename(entry, ".md").replace(/-/g, " "), type: fm.type, path: full, relPath: `wiki/${rel}`, content, sources: fm.sources, links: extractWikilinks(content), description: fm.description });
         } catch { /* skip */ }
@@ -906,6 +943,9 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
   }
 
   loadState();
+  // Persist once after startup so legacy absolute paths are migrated when
+  // their project directory is available at the new location.
+  if (sources.size > 0) persist();
   // 启动时恢复 BM25 搜索索引（重建每个 ready wiki 的 index.db / pagesMap / searchEngines）。
   // loadState 只恢复元数据（sources map）；索引数据虽持久，但为对齐磁盘正文并避免
   // search / pages / graph 在重启后返回空，仍从磁盘扫描重建一次。

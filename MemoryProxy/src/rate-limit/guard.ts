@@ -4,7 +4,7 @@ import { log } from "../report/log.js";
 import { RedisRateLimitStore, type RateLimitDecision } from "./redis-store.js";
 import { getActualInputTokens } from "./usage.js";
 
-export type RateLimitProtocol = "openai" | "anthropic";
+export type RateLimitProtocol = "openai" | "responses" | "anthropic";
 
 export class RateLimitExceededError extends Error {
   constructor(public readonly response: Response) {

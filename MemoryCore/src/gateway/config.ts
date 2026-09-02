@@ -451,6 +451,9 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     baseUrl: env("TDAI_LLM_BASE_URL") ?? str(llmConfig, "baseUrl") ?? "https://api.openai.com/v1",
     apiKey: env("TDAI_LLM_API_KEY") ?? str(llmConfig, "apiKey") ?? "",
     model: env("TDAI_LLM_MODEL") ?? str(llmConfig, "model") ?? "gpt-4o",
+    protocol: (env("TDAI_LLM_PROTOCOL") ?? str(llmConfig, "protocol")) === "responses"
+      ? "responses"
+      : "openai",
     maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? num(llmConfig, "maxTokens") ?? 4096,
     timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? num(llmConfig, "timeoutMs") ?? 120_000,
     provider: llmProvider,
@@ -492,6 +495,7 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       baseUrl: llm.baseUrl,
       apiKey: llm.apiKey,
       model: llm.model,
+      protocol: llm.protocol,
       maxTokens: llm.maxTokens ?? 4096,
       timeoutMs: llm.timeoutMs ?? 120_000,
       provider: llm.provider,

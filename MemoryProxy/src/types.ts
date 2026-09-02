@@ -569,6 +569,7 @@ export interface MemCommandConfig {
     url: string;
     apiKey: string;
     timeoutMs: number;
+    protocol?: "openai" | "responses";
   };
 }
 
@@ -890,6 +891,7 @@ export interface RawYamlConfig {
       url?: unknown;
       apiKey?: unknown;
       timeoutMs?: unknown;
+      protocol?: unknown;
     };
   };
 }

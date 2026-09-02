@@ -587,10 +587,13 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
   if (usage.error) return null;
 
   const promptDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined;
+  const inputDetails = usage.input_tokens_details as Record<string, unknown> | undefined;
   const cacheCreation = usage.cache_creation as Record<string, unknown> | undefined;
+  const isResponses = /(?:\/v1)?\/responses(\/|\?|$)/i.test(entry.upstreamUrl);
   const cacheHit =
     num(usage.prompt_cache_hit_tokens) ||
     num(usage.cache_read_input_tokens) ||
+    num(inputDetails?.cached_tokens) ||
     num(promptDetails?.cached_tokens);
   const cacheMiss = num(usage.prompt_cache_miss_tokens);
   const cacheWrite =
@@ -600,10 +603,11 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
   // prompt_tokens 语义：总输入（含缓存）
   //   - OpenAI / DeepSeek: 直接取 usage.prompt_tokens
   //   - TokenHub Anthropic: usage.input_tokens 已排除 cache，需加回 cache_hit + cache_write
+  //   - Responses: usage.input_tokens 已包含缓存，不能再次相加
   //     才能得到总输入
   const inputTokens = num(usage.input_tokens);
   const promptTokens =
-    num(usage.prompt_tokens) || (inputTokens + cacheHit + cacheWrite);
+    num(usage.prompt_tokens) || (isResponses ? inputTokens : inputTokens + cacheHit + cacheWrite);
   const completionTokens = num(usage.completion_tokens) || num(usage.output_tokens);
   // total_tokens 语义：总 token = 输入 + 输出。
   //   - OpenAI / DeepSeek: 上游已给 usage.total_tokens，直接采用

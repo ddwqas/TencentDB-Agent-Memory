@@ -75,7 +75,8 @@ export class PersonaGenerator {
   }
 
   /**
-   * Execute local persona generation without advancing checkpoint.
+   * Execute local persona generation without advancing checkpoint. Returns
+   * false only when there is no work; generation failures throw for retry.
    */
   async generateLocalPersona(triggerReason?: string): Promise<boolean> {
     const startMs = Date.now();
@@ -216,7 +217,7 @@ export class PersonaGenerator {
     } catch (err) {
       const elapsedMs = Date.now() - startMs;
       this.logger?.error(`${TAG} Persona generation failed after ${elapsedMs}ms: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
-      return false;
+      throw err;
     }
 
     // 9. Read LLM-written persona.md and apply post-processing
@@ -231,18 +232,19 @@ export class PersonaGenerator {
       }
       if (!raw) throw new Error(`${targetFile} not found`);
       personaText = raw;
-    } catch {
+    } catch (err) {
       // LLM failed to write persona.md — treat as failure
       this.logger?.error(`${TAG} LLM did not write ${targetFile} — file not found after runner completed`);
-      return false;
+      throw err instanceof Error ? err : new Error(`${targetFile} not found after persona generation`);
     }
 
     // 10. Strip any navigation the LLM might have added + sanitize for safe injection
     personaText = escapeXmlTags(stripSceneNavigation(personaText).trim());
 
     if (!personaText) {
-      this.logger?.error(`${TAG} LLM wrote empty ${targetFile} — skipping`);
-      return false;
+      const error = new Error(`${targetFile} is empty after persona generation`);
+      this.logger?.error(`${TAG} LLM wrote empty ${targetFile} — generation failed`);
+      throw error;
     }
 
     // 11. Append fresh scene navigation and write final content
@@ -289,9 +291,7 @@ export class PersonaGenerator {
     return true;
   }
 
-  /**
-   * Backward-compatible wrapper: local generation + checkpoint advance.
-   */
+  /** Local generation followed by checkpoint advancement on success. */
   async generate(triggerReason?: string): Promise<boolean> {
     const updated = await this.generateLocalPersona(triggerReason);
     if (!updated) return false;

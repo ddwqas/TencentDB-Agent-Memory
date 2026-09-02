@@ -11,6 +11,7 @@ import type { Hono } from 'hono';
 import { validatePanelMetaHeaders } from '../../middleware/validate-panel-headers.js';
 import { respondControlError, respondEnvelope } from '../../envelope.js';
 import type { MetaEnvelope } from '../../../kernel/envelope.js';
+import type { MetaCallContext } from '../../../kernel/types.js';
 import type { PanelDeps } from '../../../panel-deps.js';
 import {
   buildCtx,
@@ -19,6 +20,7 @@ import {
   okEnvelope,
   resolveCallerUserId,
   isTeamMember,
+  ensureKnowledgeAsset,
   fetchAllMetaListItems,
   ASSET_TYPE_WIKI,
   ASSET_TYPE_CODE_GRAPH,
@@ -47,6 +49,71 @@ interface BindingRaw {
 const KNOWLEDGE_ASSET_TYPES = [ASSET_TYPE_WIKI, ASSET_TYPE_CODE_GRAPH];
 const VALID_VISIBILITY = ['private', 'team', 'restricted', 'agent', 'task'];
 
+async function getAssetForAllocation(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  knowledgeId: string,
+  teamId: string,
+  caller: string,
+): Promise<MetaEnvelope<unknown>> {
+  const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: knowledgeId }, ctx);
+  if (assetEnv.code !== 404 && !(assetEnv.code === 0 && !assetEnv.data)) return assetEnv;
+  const kc = deps.knowledgeClientFactory(ctx.instanceId);
+  let detail: {
+    id: string;
+    type: typeof ASSET_TYPE_WIKI | typeof ASSET_TYPE_CODE_GRAPH;
+    teamId: string;
+    ownerUserId: string | null;
+    status: string;
+    name: string;
+    serviceUrl: string | null;
+  } | null = null;
+  if (knowledgeId.startsWith('wiki-')) {
+    try {
+      const wiki = await kc.wikiGet(knowledgeId);
+      detail = {
+        id: wiki.wiki_id,
+        type: ASSET_TYPE_WIKI,
+        teamId: wiki.team_id,
+        ownerUserId: wiki.owner_user_id,
+        status: wiki.status,
+        name: wiki.name,
+        serviceUrl: wiki.service_url,
+      };
+    } catch {
+      return assetEnv;
+    }
+  } else {
+    try {
+      const graph = await kc.codeGraphGet(knowledgeId);
+      detail = {
+        id: graph.code_graph_id,
+        type: ASSET_TYPE_CODE_GRAPH,
+        teamId: graph.team_id,
+        ownerUserId: graph.owner_user_id,
+        status: graph.status,
+        name: graph.repo_name || graph.repo_url,
+        serviceUrl: graph.service_url,
+      };
+    } catch {
+      return assetEnv;
+    }
+  }
+  if (!detail || detail.status !== 'ready' || detail.teamId !== teamId || detail.ownerUserId !== caller) {
+    return assetEnv;
+  }
+  const registration = await ensureKnowledgeAsset(deps, ctx, {
+    assetId: detail.id,
+    teamId: detail.teamId,
+    assetType: detail.type,
+    name: detail.name,
+    ownerUserId: caller,
+    serviceUrl: detail.serviceUrl,
+  });
+  if (!registration.ok) return registration.env;
+  return deps.metaKernel.invoke('asset/get', { asset_id: knowledgeId }, ctx);
+}
+
 export function registerKnowledgeAllocateRoutes(api: Hono, deps: PanelDeps): void {
   const mw = validatePanelMetaHeaders(deps);
 
@@ -67,7 +134,7 @@ export function registerKnowledgeAllocateRoutes(api: Hono, deps: PanelDeps): voi
       return respondControlError(c, 403, 'NOT_TEAM_MEMBER');
     }
 
-    const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: knowledgeId }, ctx);
+    const assetEnv = await getAssetForAllocation(deps, ctx, knowledgeId, teamId, caller);
     if (assetEnv.code === 404 || (assetEnv.code === 0 && !assetEnv.data)) {
       return respondControlError(c, 404, 'KNOWLEDGE_NOT_FOUND');
     }

@@ -29,6 +29,7 @@ import type {
   Logger,
 } from "../../core/types.js";
 import type { LLMUsage } from "../../core/report/metric-tracking-runner.js";
+import { responsesCompatibleFetch } from "../../utils/responses-compatible-fetch.js";
 
 const TAG = "[memory-tdai] [standalone-runner]";
 
@@ -84,6 +85,8 @@ export interface StandaloneLLMConfig {
   apiKey: string;
   /** Default model name (e.g. "gpt-4o"). */
   model: string;
+  /** OpenAI wire protocol. Defaults to Chat Completions. */
+  protocol?: "openai" | "responses";
   /** Default max output tokens. */
   maxTokens?: number;
   /** Request timeout in milliseconds (default: 120_000). */
@@ -298,14 +301,17 @@ export class StandaloneLLMRunner implements LLMRunner {
       `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms`,
     );
 
-    // Create OpenAI-compatible provider via AI SDK
-    // Use "compatible" mode to call /chat/completions (not Responses API),
-    // which works with all OpenAI-compatible backends (DeepSeek, Qwen, etc.)
+    // Create the OpenAI-compatible provider once, then select the configured
+    // wire protocol for every text/tool workload using this runner.
     const provider = createOpenAI({
       baseURL: this.config.baseUrl,
       apiKey: this.config.apiKey,
       compatibility: "compatible",
+      fetch: this.config.protocol === "responses" ? responsesCompatibleFetch : undefined,
     });
+    const model = this.config.protocol === "responses"
+      ? provider.responses(this.model)
+      : provider.chat(this.model);
 
     // Select tools based on mode + storage
     // Service mode (COS): use storage-backed tools → LLM reads/writes via StorageAdapter
@@ -337,7 +343,7 @@ export class StandaloneLLMRunner implements LLMRunner {
         : timeoutSignal;
 
       const callParams = {
-        model: provider.chat(this.model),
+        model,
         system: params.systemPrompt,
         prompt: params.prompt,
         // Only attach tools when actually enabled — passing an empty object

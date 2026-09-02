@@ -746,7 +746,7 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
     acceptedRecords.push(record);
   }
 
-  // Notify pipeline: trigger async L1 extraction (service mode).
+  // Notify pipeline: trigger asynchronous L1 extraction in every deployment mode.
   // Each role=user message counts as one conversation round for threshold/timer logic.
   // teamId/agentId 透传给 captureAtomic 决定 hash slot 与锁粒度。
   if (deps.notifyPipeline) {

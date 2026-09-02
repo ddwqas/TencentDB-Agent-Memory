@@ -86,7 +86,7 @@ docker run -d --name memory-hub \
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `LLM_PROTOCOL` | `openai` | LLM 协议：`openai` 走 `/chat/completions`，`anthropic` 走 `/messages` |
+| `LLM_PROTOCOL` | `openai` | LLM 协议：`openai` 走 `/chat/completions`，`responses` 走 `/responses`，`anthropic` 走 `/messages` |
 | `LLM_MODEL` | `Memory-Model` | 模型 ID，透传到 proxy/TokenHub |
 | `LLM_MODE` | `proxy` | `proxy`：走 Memory Gateway LLM 转发；`custom`：直连 BYO 端点 |
 | `LLM_MAX_TOKENS` | `32768` | 单次 LLM 调用最大输出 token |
@@ -99,6 +99,7 @@ docker run -d --name memory-hub \
 | 协议 | 适用模型 | 端点 |
 | --- | --- | --- |
 | `openai`（默认） | `Memory-Model`、`deepseek-v4-pro` | `/chat/completions` |
+| `responses` | 支持 OpenAI Responses 的模型 | `/responses` |
 | `anthropic` | `ep-pksklwtb`、`claude-sonnet-4-5` 等 | `/messages` |
 
 切换模型时协议必须配套：

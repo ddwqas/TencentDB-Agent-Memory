@@ -222,7 +222,7 @@ export class CoreKnowledgeClient {
     const result = await this._cachedFetch<KnowledgeItem[]>(cacheKey, async () => {
       const env = await this._post<CoreKnowledgeListResult>(
         `${this.endpoint}/v3/knowledge/list`,
-        { team_id: teamId, knowledge_ids: ids },
+        { team_id: teamId, knowledge_ids: ids, pagination: { limit: 200, offset: 0 } },
         {},
         opts.serviceId,
       );
@@ -258,7 +258,14 @@ export class CoreKnowledgeClient {
         // asset_types 服务端过滤 —— 无关类型（skill / chat_memory）不再占分页额度，
         // 避免 wiki/code_graph 被 skill 挤出默认 limit=20 后拿不到。
         // 依赖 core commit da04d194 (feat/meta asset_types filter)。
-        { agent_id: agentId, apply_visibility_filter: true, touch_usage: false, asset_types: ["llm_wiki", "code_graph"] },
+        {
+          agent_id: agentId,
+          apply_visibility_filter: true,
+          touch_usage: false,
+          asset_types: ["llm_wiki", "code_graph"],
+          limit: 100,
+          offset: 0,
+        },
         { "x-tdai-user-key": userKey },
         opts.serviceId,
       );

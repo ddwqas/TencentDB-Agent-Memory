@@ -1,10 +1,11 @@
-export type UsageProtocol = "openai" | "anthropic";
+export type UsageProtocol = "openai" | "responses" | "anthropic";
 
 /**
  * Normalize upstream usage to total model input tokens.
  *
  * This follows the existing ClickHouse/credit conventions:
- * - OpenAI prompt_tokens already includes cached input.
+ * - OpenAI Chat Completions prompt_tokens already includes cached input.
+ * - Responses input_tokens already includes cached input.
  * - Anthropic input_tokens excludes cache reads/creation, so add both back.
  */
 export function getActualInputTokens(
@@ -14,6 +15,9 @@ export function getActualInputTokens(
   if (!usage) return 0;
   if (protocol === "openai") {
     return numberField(usage.prompt_tokens);
+  }
+  if (protocol === "responses") {
+    return numberField(usage.input_tokens);
   }
   return numberField(usage.input_tokens)
     + numberField(usage.cache_read_input_tokens)

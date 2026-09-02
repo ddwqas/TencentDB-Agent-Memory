@@ -623,6 +623,10 @@ export function createL1Runner(opts: {
           storage,
         });
 
+        if (!l1Result.success) {
+          throw new Error(`L1 extraction failed for session ${group.sessionId || sessionKey}`);
+        }
+
         totalExtracted += l1Result.extractedCount;
         totalStored += l1Result.storedCount;
         if (l1Result.storedCount > 0) {
@@ -831,7 +835,13 @@ export function createL2Runner(opts: {
         layer: "l2",
       }));
       const extractResult = await extractor.extract(memories);
-      if (!(extractResult.success && extractResult.memoriesProcessed > 0)) continue;
+      if (!extractResult.success) {
+        throw new Error(
+          `L2 scene extraction failed for session ${ctx.sessionId ?? sessionKey}`,
+          { cause: extractResult.error },
+        );
+      }
+      if (extractResult.memoriesProcessed <= 0) continue;
       if (extractResult.emptyExtraction) {
         anyEmptyExtraction = true;
         logger.warn(`${TAG} [L2] Extraction produced no file changes (empty run), skipping checkpoint increment`);

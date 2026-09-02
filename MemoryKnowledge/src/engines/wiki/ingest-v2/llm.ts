@@ -2,7 +2,8 @@
  * llm.ts — OpenAI 兼容 chat 调用封装（wiki ingest 专用）。
  *
  * 复用仓库已有的 Vercel AI SDK（`ai` + `@ai-sdk/openai`），走标准
- * `/chat/completions`（compatibility: "compatible"），兼容各类 OpenAI 兼容后端。
+ * OpenAI 协议按配置选择 Chat Completions 或 Responses API，兼容各类
+ * OpenAI-compatible 后端。
  *
  * llmConfig 的实际形状由上层 module.ts 传入，字段命名为：
  *   { provider, apiKey, model, customEndpoint, maxContextSize }
@@ -18,7 +19,7 @@ const log = createLogger("wiki-ingest-llm");
 
 /** 上层传入的原始 llmConfig（宽松，字段可能用不同命名）。 */
 export interface RawLlmConfig {
-  protocol?: "openai" | "anthropic";
+  protocol?: "openai" | "responses" | "anthropic";
   provider?: string;
   apiKey?: string;
   model?: string;
@@ -42,7 +43,7 @@ export interface RawLlmConfig {
 
 /** 归一化后的配置。 */
 export interface NormalizedLlmConfig {
-  protocol: "openai" | "anthropic";
+  protocol: "openai" | "responses" | "anthropic";
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -64,7 +65,9 @@ const DEFAULT_TIMEOUT_MS = 1_200_000; // 20min — reasoning 模型需要更长�
  */
 export function normalizeLlmConfig(raw: RawLlmConfig | undefined): NormalizedLlmConfig {
   const cfg = raw ?? {};
-  const protocol = cfg.protocol ?? "openai";
+  const protocol = cfg.protocol === "anthropic" || cfg.protocol === "responses"
+    ? cfg.protocol
+    : "openai";
   const baseUrl = cfg.baseUrl || cfg.customEndpoint || "";
   const apiKey = cfg.apiKey || "";
   const model = cfg.model || DEFAULT_MODEL;
@@ -112,9 +115,14 @@ export function createLlmClient(raw: RawLlmConfig | undefined): LlmClient {
   }
 
   // 按 protocol 选 AI SDK provider 工厂（两者都实现 LanguageModelV3 接口）。
-  const provider = config.protocol === "anthropic"
-    ? createAnthropic({ baseURL: config.baseUrl, apiKey: config.apiKey })
-    : createOpenAI({ baseURL: config.baseUrl, apiKey: config.apiKey });
+  const model = config.protocol === "anthropic"
+    ? createAnthropic({ baseURL: config.baseUrl, apiKey: config.apiKey }).chat(config.model)
+    : (() => {
+        const provider = createOpenAI({ baseURL: config.baseUrl, apiKey: config.apiKey });
+        return config.protocol === "responses"
+          ? provider.responses(config.model)
+          : provider.chat(config.model);
+      })();
 
   return {
     config,
@@ -139,7 +147,7 @@ export function createLlmClient(raw: RawLlmConfig | undefined): LlmClient {
 
       try {
         const callParams = {
-          model: provider.chat(config.model),
+          model,
           system: params.system,
           prompt: params.prompt,
           maxOutputTokens: params.maxOutputTokens ?? config.maxTokens,

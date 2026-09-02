@@ -1,0 +1,5 @@
+.env
+.env.*
+.git
+*.log
+tdai-local-docker-context

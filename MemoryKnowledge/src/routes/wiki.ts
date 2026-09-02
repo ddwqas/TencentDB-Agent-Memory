@@ -51,6 +51,15 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
   const app = new Hono();
   const { wikiService, wikiMgr, publicBaseUrl } = deps;
 
+  function syncRegisteredWiki(wikiId: string, operation: string): void {
+    if (!wikiMgr.get(wikiId)) return;
+    try {
+      wikiMgr.sync(wikiId);
+    } catch (err) {
+      console.warn(`[wiki] wikiMgr.sync(${wikiId}) failed after ${operation}:`, err);
+    }
+  }
+
   // ═══════════════════ Asset Layer ═══════════════════
 
   // ── id-only (service_id + wiki_id) ──
@@ -321,7 +330,7 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       const result = await wikiService.rawRm(ids.service_id, ids.team_id, wikiId, filenames);
       const err = maybeWriteError(result);
       if (err) return err;
-      try { wikiMgr.sync(wikiId); } catch (e) { console.warn(`[wiki] wikiMgr.sync(${wikiId}) failed after raw/rm:`, e); }
+      syncRegisteredWiki(wikiId, "raw/rm");
       return c.json(wrapOk(result));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -410,7 +419,7 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       const result = wikiService.pageWriteMany(ids.service_id, ids.team_id, wikiId, validated);
       const err = maybeWriteError(result);
       if (err) return err;
-      try { wikiMgr.sync(wikiId); } catch (e) { console.warn(`[wiki] wikiMgr.sync(${wikiId}) failed after page/write:`, e); }
+      syncRegisteredWiki(wikiId, "page/write");
       return c.json(wrapOk({ items: result }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -437,7 +446,7 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       const result = await wikiService.pageRm(ids.service_id, ids.team_id, wikiId, refs);
       const err = maybeWriteError(result);
       if (err) return err;
-      try { wikiMgr.sync(wikiId); } catch (e) { console.warn(`[wiki] wikiMgr.sync(${wikiId}) failed after page/rm:`, e); }
+      syncRegisteredWiki(wikiId, "page/rm");
       return c.json(wrapOk(result));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

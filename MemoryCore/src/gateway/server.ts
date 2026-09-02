@@ -20,6 +20,8 @@ import { URL } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import zlib from "node:zlib";
 import dayjs from "dayjs";
+import { generateText } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
 import { TdaiCore } from "../core/tdai-core.js";
 import { StandaloneHostAdapter } from "../adapters/standalone/host-adapter.js";
 import { loadGatewayConfig, parseBrokers } from "./config.js";
@@ -78,6 +80,7 @@ import type { MemorySystemUserConfig } from "../metadata/system-user.js";
 import { validateLlmProviderConfig, LlmResolveError } from "./llm-resolver.js";
 import type { StandaloneLLMConfig } from "../adapters/standalone/llm-runner.js";
 import { resolveStandaloneLlmForRuntime } from "../adapters/standalone/llm-provider-resolver.js";
+import { responsesCompatibleFetch } from "../utils/responses-compatible-fetch.js";
 import { resolveReportedCredit } from "./quota-credit-policy.js";
 import {
   initApiTraceConfig,
@@ -939,6 +942,23 @@ export class TdaiGateway {
         getMetadataService: (instanceId) => this.ensureMetadataService(instanceId),
       };
 
+      // Pipeline notify is shared by standalone and service deployments. L0 is
+      // persisted through the v2 router in both modes; the corresponding L1
+      // task must be enqueued regardless of whether per-instance resolvers are
+      // available.
+      if (this.statefulPipelineManager) {
+        const pipelineManager = this.statefulPipelineManager;
+        v2Deps.notifyPipeline = async (
+          instanceId: string,
+          sessionId: string,
+          rounds: number,
+          teamId?: string,
+          agentId?: string,
+        ) => {
+          await pipelineManager.notifyConversation(sessionId, [], instanceId, rounds, teamId, agentId);
+        };
+      }
+
       // Service mode: inject per-instance resolvers (storePool + configProvider + COS)
       if (this.storePool && this.configProvider) {
         const storePool = this.storePool;
@@ -954,20 +974,6 @@ export class TdaiGateway {
         };
 
         v2Deps.resolveStorage = (instanceId: string) => this.resolveStorageForInstance(instanceId);
-
-        // Pipeline notify: trigger async L1 extraction when v2 /conversation/add writes L0
-        if (this.statefulPipelineManager) {
-          const pipelineManager = this.statefulPipelineManager;
-          v2Deps.notifyPipeline = async (
-            instanceId: string,
-            sessionId: string,
-            rounds: number,
-            teamId?: string,
-            agentId?: string,
-          ) => {
-            await pipelineManager.notifyConversation(sessionId, [], instanceId, rounds, teamId, agentId);
-          };
-        }
 
         // Inject QuotaManager for memory/credit limit checks
         if (this.quotaManager) {
@@ -1996,6 +2002,7 @@ export class TdaiGateway {
         baseUrl: effective.baseUrl,
         apiKey: effective.apiKey,
         model: effective.model ?? "default",
+        protocol: effective.protocol,
         timeoutMs: effective.timeoutMs ?? 120_000,
         stream: effective.stream ?? false,
       },
@@ -2979,34 +2986,30 @@ export class TdaiGateway {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 30000);
         try {
-          const response = await fetch(`${effective.baseUrl}/chat/completions`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${effective.apiKey}`,
-            },
-            body: JSON.stringify({
-              model: effective.model || params.model,
-              messages: params.messages,
-              temperature: params.temperature,
-              max_tokens: params.max_tokens,
-            }),
-            signal: controller.signal,
+          const provider = createOpenAI({
+            baseURL: effective.baseUrl,
+            apiKey: effective.apiKey,
+            compatibility: "compatible",
+            fetch: effective.protocol === "responses" ? responsesCompatibleFetch : undefined,
+          });
+          const model = effective.protocol === "responses"
+            ? provider.responses(effective.model || params.model)
+            : provider.chat(effective.model || params.model);
+          const result = await generateText({
+            model,
+            messages: params.messages,
+            temperature: params.temperature,
+            maxOutputTokens: params.max_tokens,
+            abortSignal: controller.signal,
           });
           clearTimeout(timer);
-          if (!response.ok) {
-            throw new Error(`LLM API returned ${response.status}: ${await response.text()}`);
-          }
-          const json = (await response.json()) as any;
-          const finishReason = json.choices?.[0]?.finish_reason;
-          if (finishReason === "length") {
-            const content = json.choices?.[0]?.message?.content ?? "";
+          if (result.finishReason === "length") {
             logger.warn(
               `[offload-llm] Response truncated (finish_reason=length, max_tokens=${params.max_tokens}), ` +
-              `content=${content.length} chars`,
+              `content=${result.text.length} chars`,
             );
           }
-          return json.choices?.[0]?.message?.content ?? "";
+          return result.text ?? "";
         } catch (err) {
           clearTimeout(timer);
           throw err;

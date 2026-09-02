@@ -1,0 +1,51 @@
+# 源码整体镜像只需要四个服务的源码和依赖清单。
+.git
+**/.git
+**/node_modules
+**/dist
+**/build
+**/coverage
+**/data
+**/logs
+**/.env
+**/.env.*
+**/*.log
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+**/*.md
+**/__tests__
+**/tests
+**/.claude
+**/.codebuddy
+**/.vscode
+**/.idea
+
+# 不参与整体镜像构建的本地部署产物。
+deploy/local-source-docker/.admin-key
+deploy/local-source-docker/.memory-core-config
+deploy/local-source-docker/.proxy-config
+deploy/local-source-docker/tdai-local-docker-context
+
+# MemoryCore 的文档、测试和发布辅助目录。
+MemoryCore/deploy
+MemoryCore/sdk
+MemoryCore/docker
+MemoryCore/backup-*
+MemoryCore/*.pdf
+MemoryCore/*.pptx
+MemoryCore/*.html
+MemoryCore/*.png
+MemoryCore/*.tgz
+
+# MemoryProxy 的运行期和测试辅助内容。
+MemoryProxy/dashboard
+MemoryProxy/gateway
+MemoryProxy/e2e
+MemoryProxy/scripts/e2e-*
+MemoryProxy/scripts/verify-*
+MemoryProxy/scripts/warm-*
+MemoryProxy/scripts/inspect-*
+MemoryProxy/scripts/smoke-*
+MemoryProxy/scripts/mock-*

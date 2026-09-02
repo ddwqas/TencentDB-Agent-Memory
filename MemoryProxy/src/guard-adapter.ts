@@ -330,7 +330,8 @@ export function joinUrl(base: string, requestPath: string): string {
   // agentUpstreams 或完整 endpoint base 已含路径时勿再拼接。
   if (
     baseWithoutQuery.endsWith("/messages") ||
-    baseWithoutQuery.endsWith("/chat/completions")
+    baseWithoutQuery.endsWith("/chat/completions") ||
+    baseWithoutQuery.endsWith("/responses")
   ) {
     return normalizedBase;
   }

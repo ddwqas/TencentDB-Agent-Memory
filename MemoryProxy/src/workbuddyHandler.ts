@@ -53,6 +53,7 @@ import { trackWrite, withL0Retry } from "./tdai/pending-writes.js";
 import type { TdaiIdentity, TdaiMessage } from "./tdai/types.js";
 import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
+import { recordInputTokenUsage } from "./rate-limit/guard.js";
 
 // ── Handler-level constants ──────────────────────────────────────────────────
 
@@ -302,13 +303,13 @@ function extractLatestWorkbuddyUserMessage(input: unknown): TdaiMessage | null {
   return { role: "user", content: text };
 }
 
-function createWorkbuddyTdaiClient(config: ProxyConfig): TdaiClient | null {
+function createWorkbuddyTdaiClient(config: ProxyConfig, spaceId?: string): TdaiClient | null {
   if (!config.tdai?.enabled || !config.tdai?.memory?.enabled || !config.tdai?.endpoint) return null;
   return new TdaiClient({
     enabled: config.tdai.enabled,
     endpoint: config.tdai.endpoint,
     apiKey: config.tdai.apiKey,
-    serviceId: config.tdai.serviceId,
+    serviceId: spaceId || config.tdai.serviceId,
     writeL0: config.tdai.memory.writeL0,
     recallL1: config.tdai.memory.recallL1,
     injectL2L3: config.tdai.memory.injectL2L3,
@@ -320,6 +321,7 @@ function createWorkbuddyTdaiClient(config: ProxyConfig): TdaiClient | null {
 
 function buildWorkbuddyArchiveCtx(args: {
   config: ProxyConfig;
+  spaceId: string;
   sessionInfo: Record<string, unknown> | null | undefined;
   injectionSkipped: boolean;
   input: unknown[];
@@ -335,7 +337,7 @@ function buildWorkbuddyArchiveCtx(args: {
   // 对齐 codexHandler.buildArchiveCtx (line 855-857)。
   const tdaiClient = args.assetCapabilities?.chat_memory === false
     ? null
-    : createWorkbuddyTdaiClient(args.config);
+    : createWorkbuddyTdaiClient(args.config, args.spaceId);
   const tdaiIdentity = deriveTdaiIdentity({
     sessionInfo,
     userId: args.userId || null,
@@ -470,8 +472,8 @@ function filterResponseHeaders(source: Headers): Headers {
 }
 
 /**
- * Forward the request to upstream. On SSE responses with `lf != null`, tees
- * the stream and reports usage/text to langfuse (best-effort).
+ * Forward the request to upstream. Main Responses streams are tapped for
+ * Langfuse/archive; auxiliary streams are tapped for usage accounting only.
  */
 async function forwardToUpstream(
   c: Context,
@@ -484,6 +486,7 @@ async function forwardToUpstream(
   pipe: ReturnType<typeof createPipeline>,
   lf: LangfuseTurnContext | null,
   archiveCtx: WorkbuddyArchiveCtx | null = null,
+  captureUsage = false,
 ): Promise<Response> {
   // ── Per-agent upstream override ──
   // 对齐 codexHandler: 支持 config.upstream.agents?.workbuddy 单独指 URL/apiKey，
@@ -515,7 +518,7 @@ async function forwardToUpstream(
       keyId,
       sessionKey: keyId,
       upstreamUrl,
-      stream: true,
+      stream: body.stream !== false,
     });
   } catch {
     /* logger best-effort */
@@ -587,8 +590,104 @@ async function forwardToUpstream(
     }
   }
 
-  // Non-SSE or no langfuse ctx → passthrough
-  if (!isSSE || !upstreamResp.body || !lf) {
+  if (!isSSE && upstreamResp.body && (captureUsage || lf || archiveCtx)) {
+    const raw = await upstreamResp.text();
+    let usage: Record<string, unknown> | undefined;
+    let assistantText = "";
+    let toolUseCount = 0;
+    try {
+      const payload = JSON.parse(raw) as Record<string, unknown>;
+      if (payload.usage && typeof payload.usage === "object") {
+        usage = payload.usage as Record<string, unknown>;
+      }
+      const hasOutputText = typeof payload.output_text === "string";
+      if (hasOutputText) {
+        assistantText = payload.output_text;
+      }
+      if (Array.isArray(payload.output)) {
+        for (const item of payload.output as Array<Record<string, unknown>>) {
+          if (item?.type === "function_call") toolUseCount++;
+          if (hasOutputText || item?.type !== "message" || !Array.isArray(item.content)) continue;
+          for (const part of item.content as Array<Record<string, unknown>>) {
+            if ((part?.type === "output_text" || part?.type === "text") && typeof part.text === "string") {
+              assistantText += part.text;
+            }
+          }
+        }
+      }
+    } catch {
+      // Preserve the original non-JSON Responses payload unchanged.
+    }
+    if (usage && Object.keys(usage).length > 0) {
+      await recordInputTokenUsage({
+        config,
+        instanceId: extractSpaceIdFromPath(c.req.path) ?? undefined,
+        modelId,
+        usage,
+        protocol: "responses",
+      });
+      try {
+        writeLog(config, {
+          timestamp: new Date().toISOString(),
+          event: "usage",
+          modelId,
+          keyId,
+          sessionKey: lf?.sessionId ?? keyId,
+          turnSeq: lf?.turnSeq,
+          userInput: lf?.userQuery || undefined,
+          upstreamUrl,
+          stream: false,
+          usage,
+          spaceId: extractSpaceIdFromPath(c.req.path) ?? undefined,
+        });
+      } catch (logErr: unknown) {
+        pipe.error("LOG_WRITE", logErr);
+      }
+    }
+    const endTime = new Date().toISOString();
+    if (lf) {
+      try {
+        langfuseReportGeneration({
+          traceId: lf.traceId,
+          name: `workbuddy:${modelId}`,
+          model: modelId,
+          startTime,
+          endTime,
+          input: buildWorkbuddyLangfuseInput(body),
+          output: assistantText,
+          usage,
+          traceName: lf.traceName,
+          userId: lf.userId,
+          sessionId: lf.sessionId,
+          tags: lf.tags,
+          traceInput: lf.userQuery || undefined,
+          traceOutput: assistantText || undefined,
+          observationMetadata: {
+            stream: false,
+            keyId,
+            upstreamUrl,
+            tool_use_count: toolUseCount,
+          },
+        });
+      } catch (lfErr: unknown) {
+        pipe.error("LANGFUSE_SPAN", lfErr);
+      }
+    }
+    if (archiveCtx) {
+      try {
+        await triggerWorkbuddyArchiveHooks(archiveCtx, assistantText, toolUseCount);
+      } catch (archiveErr: unknown) {
+        pipe.error("WORKBUDDY_ARCHIVE", archiveErr instanceof Error ? archiveErr : new Error(String(archiveErr)));
+      }
+    }
+    return new Response(raw, {
+      status: upstreamResp.status,
+      headers: respHeaders,
+    });
+  }
+
+  // Non-SSE or no telemetry requested → passthrough
+  if (!isSSE || !upstreamResp.body || (!lf && !captureUsage)) {
     return new Response(upstreamResp.body, {
       status: upstreamResp.status,
       headers: respHeaders,
@@ -603,6 +702,8 @@ async function forwardToUpstream(
     keyId,
     traceId,
     lf,
+    captureUsage,
+    spaceId: extractSpaceIdFromPath(c.req.path) ?? undefined,
     config,
     pipe,
     archiveCtx,
@@ -625,6 +726,8 @@ interface WorkbuddyTapContext {
   keyId: string;
   traceId: string;
   lf: LangfuseTurnContext | null;
+  captureUsage: boolean;
+  spaceId?: string;
   config: ProxyConfig;
   pipe: ReturnType<typeof createPipeline>;
   archiveCtx: WorkbuddyArchiveCtx | null;
@@ -655,8 +758,9 @@ async function consumeWorkbuddyStream(
   stream: ReadableStream<Uint8Array>,
   ctx: WorkbuddyTapContext,
 ): Promise<void> {
-  // aux passthrough: skip langfuse + archive hooks
-  if (!ctx.lf) return;
+  // Auxiliary Responses requests still need usage accounting, but do not need
+  // Langfuse or archive hooks.
+  if (!ctx.lf && !ctx.captureUsage) return;
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -693,8 +797,11 @@ async function consumeWorkbuddyStream(
       for (const frame of frames) {
         const dataLines = frame
           .split("\n")
-          .filter((l) => l.startsWith("data: "))
-          .map((l) => l.slice(6));
+          .flatMap((line) => {
+            if (line.startsWith("data: ")) return [line.slice(6)];
+            if (line.startsWith("data:")) return [line.slice(5)];
+            return [];
+          });
         if (dataLines.length === 0) continue;
         const payload = dataLines.join("\n");
         if (payload === "[DONE]") continue;
@@ -745,36 +852,64 @@ async function consumeWorkbuddyStream(
   }
 
   const endTime = new Date().toISOString();
-  try {
-    // R: 用结构化 input 上报（body.input + instructions），便于 langfuse UI 排障
-    langfuseReportGeneration({
-      traceId: ctx.lf.traceId,
-      name: `workbuddy:${ctx.modelId}`,
-      model: ctx.modelId,
-      startTime: ctx.startTime,
-      endTime,
-      input: buildWorkbuddyLangfuseInput(ctx.inputBody),
-      output: assistantText,
-      usage: usage && Object.keys(usage).length > 0 ? usage : undefined,
-      traceName: ctx.lf.traceName,
-      userId: ctx.lf.userId,
-      sessionId: ctx.lf.sessionId,
-      tags: ctx.lf.tags,
-      traceInput: ctx.lf.userQuery || undefined,
-      traceOutput: assistantText,
-      observationMetadata: {
-        stream: true,
-        response_id: responseId,
-        keyId: ctx.keyId,
-        upstreamUrl: ctx.upstreamUrl,
-        tool_use_count: toolUseCount,
-      },
+  if (usage && Object.keys(usage).length > 0) {
+    await recordInputTokenUsage({
+      config: ctx.config,
+      instanceId: ctx.spaceId,
+      modelId: ctx.modelId,
+      usage,
+      protocol: "responses",
     });
-  } catch (err) {
-    ctx.pipe.info(
-      "WORKBUDDY_LANGFUSE_ERR",
-      err instanceof Error ? err.message : String(err),
-    );
+    try {
+      writeLog(ctx.config, {
+        timestamp: endTime,
+        event: "usage",
+        modelId: ctx.modelId,
+        keyId: ctx.keyId,
+        sessionKey: ctx.lf?.sessionId ?? ctx.keyId,
+        turnSeq: ctx.lf?.turnSeq,
+        userInput: ctx.lf?.userQuery || undefined,
+        upstreamUrl: ctx.upstreamUrl,
+        stream: true,
+        usage,
+        spaceId: ctx.spaceId,
+      });
+    } catch (logErr: unknown) {
+      ctx.pipe.error("LOG_WRITE", logErr);
+    }
+  }
+  if (ctx.lf) {
+    try {
+      // R: 用结构化 input 上报（body.input + instructions），便于 langfuse UI 排障
+      langfuseReportGeneration({
+        traceId: ctx.lf.traceId,
+        name: `workbuddy:${ctx.modelId}`,
+        model: ctx.modelId,
+        startTime: ctx.startTime,
+        endTime,
+        input: buildWorkbuddyLangfuseInput(ctx.inputBody),
+        output: assistantText,
+        usage: usage && Object.keys(usage).length > 0 ? usage : undefined,
+        traceName: ctx.lf.traceName,
+        userId: ctx.lf.userId,
+        sessionId: ctx.lf.sessionId,
+        tags: ctx.lf.tags,
+        traceInput: ctx.lf.userQuery || undefined,
+        traceOutput: assistantText,
+        observationMetadata: {
+          stream: true,
+          response_id: responseId,
+          keyId: ctx.keyId,
+          upstreamUrl: ctx.upstreamUrl,
+          tool_use_count: toolUseCount,
+        },
+      });
+    } catch (err) {
+      ctx.pipe.info(
+        "WORKBUDDY_LANGFUSE_ERR",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   }
 
   // ── TDAI L0 write + Skill extraction ──
@@ -867,7 +1002,7 @@ export async function handleWorkbuddyEndpoint(
   // ── 5. Aux passthrough ───────────────────────────────────────────────────
   if (isAuxiliary) {
     pipe.info("WORKBUDDY_AUX", `auxiliary request → passthrough (path=${path})`);
-    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, null);
+    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, null, true);
   }
 
   // ── 6. Session ID + langfuse turn ctx ────────────────────────────────────
@@ -1284,6 +1419,7 @@ export async function handleWorkbuddyEndpoint(
         // 配对写入, 用 userText 当 assistant 会颠倒语义。
         const memArchiveCtx = buildWorkbuddyArchiveCtx({
           config,
+          spaceId,
           sessionInfo,
           injectionSkipped,
           input,
@@ -1407,6 +1543,7 @@ export async function handleWorkbuddyEndpoint(
   // ── 10. Forward ──────────────────────────────────────────────────────────
   const archiveCtx = buildWorkbuddyArchiveCtx({
     config,
+    spaceId,
     sessionInfo,
     injectionSkipped,
     input,
@@ -1415,5 +1552,5 @@ export async function handleWorkbuddyEndpoint(
     callerUserKey,
     assetCapabilities,
   });
-  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, archiveCtx);
+  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, archiveCtx, body.stream === false);
 }

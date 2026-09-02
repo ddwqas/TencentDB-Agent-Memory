@@ -84,7 +84,7 @@ KNOWLEDGE_SERVICE_URL=http://127.0.0.1:8421
 | `TMC_CALLBACK_URL` | KS → 回调 Panel | 不要（只填根） |
 
 `LLM_MODE=proxy`（默认）：Wiki 用 Panel 按 `x-tdai-service-id` 推送的 `llm_binding`，本地不必起 Proxy。  
-`LLM_MODE=custom`：在 `.env` 设 `LLM_API_KEY` / `LLM_BASE_URL`（及可选 `LLM_PROTOCOL=anthropic`）。
+`LLM_MODE=custom`：在 `.env` 设 `LLM_API_KEY` / `LLM_BASE_URL`（及可选 `LLM_PROTOCOL=openai|responses|anthropic`）。
 
 ## 常用命令
 

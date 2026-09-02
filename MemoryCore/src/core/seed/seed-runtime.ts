@@ -85,6 +85,7 @@ async function createSeedPipeline(opts: SeedRuntimeOptions): Promise<{ pipeline:
         baseUrl: cfg.llm.baseUrl,
         apiKey: cfg.llm.apiKey,
         model: cfg.llm.model,
+        protocol: cfg.llm.protocol,
         maxTokens: cfg.llm.maxTokens,
         timeoutMs: cfg.llm.timeoutMs,
         stream: cfg.llm.stream ?? false,

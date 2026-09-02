@@ -3,7 +3,7 @@
  *
  * proxy 首个"主动"向 LLM 发起请求的模块（其它 LLM 调用都是 passthrough 反向代理）。
  * 骨架仿 packages/cost-guard/src/compressor/cfq/llm-infer.ts —— 直接 fetch OpenAI
- * chat/completions + AbortSignal.timeout，不引第三方 SDK。
+ * Chat Completions 或 Responses API + AbortSignal.timeout，不引第三方 SDK。
  *
  * 与 CFQ LLMInfer 的关键差异：
  * - CFQ 失败 = 返回 null 数组（silent fallback），因为 CFQ 是可选增强；
@@ -27,6 +27,8 @@ export interface TaskDraftConfig {
   apiKey: string;
   /** 单次调用超时（毫秒）。建议 15000-30000（草稿要写完整）。 */
   timeoutMs: number;
+  /** OpenAI wire protocol. Defaults to Chat Completions. */
+  protocol?: "openai" | "responses";
 }
 
 /** 最近对话消息片段（供 LLM 理解上下文）。 */
@@ -464,23 +466,33 @@ async function attemptDraftOnce(
   let resp: Response;
   // 首次用短 timeout（默认 10s），后续用完整 cfg.timeoutMs
   const effectiveTimeoutMs = attempt === 1 ? firstAttemptTimeoutMs(cfg.timeoutMs) : cfg.timeoutMs;
+  const isResponses = cfg.protocol === "responses";
   try {
-    resp = await fetch(`${cfg.url}/chat/completions`, {
+    resp = await fetch(`${cfg.url}/${isResponses ? "responses" : "chat/completions"}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${cfg.apiKey}`,
       },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userMessage },
-        ],
-        temperature: 0.3,
-        max_tokens: LLM_MAX_TOKENS,
-        response_format: { type: "json_object" },
-      }),
+      body: JSON.stringify(isResponses
+        ? {
+            model: cfg.model,
+            instructions: systemPrompt,
+            input: userMessage,
+            temperature: 0.3,
+            max_output_tokens: LLM_MAX_TOKENS,
+            text: { format: { type: "json_object" } },
+          }
+        : {
+            model: cfg.model,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userMessage },
+            ],
+            temperature: 0.3,
+            max_tokens: LLM_MAX_TOKENS,
+            response_format: { type: "json_object" },
+          }),
       signal: AbortSignal.timeout(effectiveTimeoutMs),
     });
   } catch (err) {
@@ -508,20 +520,24 @@ async function attemptDraftOnce(
   //   - "length"        触到 max_tokens 被截断 → 需要扩大 max_tokens
   //   - "content_filter" 触发安全策略 → prompt/context 有问题
   //   - null            上游没吐（多半是空对象场景）
-  const finishReason =
-    (payload as { choices?: Array<{ finish_reason?: string | null }> }).choices?.[0]
-      ?.finish_reason ?? "unknown";
+  const finishReason = isResponses
+    ? ((payload as { status?: string }).status ?? "unknown")
+    : ((payload as { choices?: Array<{ finish_reason?: string | null }> }).choices?.[0]
+        ?.finish_reason ?? "unknown");
   const usage = (payload as { usage?: { completion_tokens?: number; total_tokens?: number } })
     .usage;
   const completionTokens = usage?.completion_tokens ?? -1;
 
   const choices = (payload as { choices?: Array<{ message?: { content?: string } }> }).choices;
-  if (!Array.isArray(choices) || choices.length === 0) {
-    return { ok: false, error: "LLM response has no choices" };
-  }
-  const content = choices[0]?.message?.content;
+  const content = isResponses
+    ? ((payload as { output_text?: string }).output_text ||
+      ((payload as { output?: Array<{ content?: Array<{ text?: string }> }> }).output ?? [])
+        .flatMap((item) => item.content ?? [])
+        .map((item) => item.text ?? "")
+        .join(""))
+    : choices?.[0]?.message?.content;
   if (typeof content !== "string" || content.length === 0) {
-    return { ok: false, error: "LLM response content empty" };
+    return { ok: false, error: isResponses ? "LLM response has no output_text" : "LLM response content empty" };
   }
 
   // 观测公共字段（每条 FAIL 日志都会带这三个，方便一眼看出根因）

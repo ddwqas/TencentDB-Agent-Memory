@@ -1,6 +1,7 @@
 /** Config loading: YAML file → merge with CLI overrides → ProxyConfig. */
 
 import { readFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { load as yamlLoad } from "js-yaml";
 import type { CostGuardConfig, ProxyConfig, RawYamlConfig } from "./types.js";
 
@@ -266,6 +267,10 @@ function parseUpstreamAgents(
 export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
   const configPath = overrides.configFile || "config.yaml";
   const yaml = loadYamlConfig(configPath);
+  const configuredSqlitePath = yaml.storage?.sqlite?.dbPath ?? DEFAULT_CONFIG.storage.sqlite.dbPath;
+  const sqliteDbPath = configuredSqlitePath && !isAbsolute(configuredSqlitePath)
+    ? resolve(dirname(resolve(configPath)), configuredSqlitePath)
+    : configuredSqlitePath;
 
   return {
     server: {
@@ -360,7 +365,7 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
           graceCloseDelayMs: yaml.storage?.cos?.shark?.graceCloseDelayMs ?? DEFAULT_CONFIG.storage.cos.shark.graceCloseDelayMs,
         },
       },
-      sqlite: { dbPath: yaml.storage?.sqlite?.dbPath ?? DEFAULT_CONFIG.storage.sqlite.dbPath },
+      sqlite: { dbPath: sqliteDbPath },
       fs: { fsRoot: yaml.storage?.fs?.fsRoot ?? DEFAULT_CONFIG.storage.fs.fsRoot },
     },
     costGuard: parseCostGuard(yaml),
@@ -521,6 +526,10 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
                 typeof yaml.memCommand.taskDraft.timeoutMs === "number"
                   ? yaml.memCommand.taskDraft.timeoutMs
                   : 20000,
+              protocol:
+                yaml.memCommand.taskDraft.protocol === "responses" || process.env.TDAI_TASK_DRAFT_PROTOCOL === "responses"
+                  ? "responses"
+                  : "openai",
             },
           }
         : {}),

@@ -369,10 +369,24 @@ export function registerOffload(api: any, offloadConfig: OffloadConfig): void {
       const providerCfg = models?.providers?.[providerKey];
       const baseUrl = providerCfg?.baseUrl ?? providerCfg?.baseURL;
       const apiKey = providerCfg?.apiKey;
+      const providerProtocol = providerCfg?.protocol === "responses"
+        ? "responses"
+        : providerCfg?.protocol === "openai"
+          ? "openai"
+          : undefined;
 
       if (baseUrl && apiKey) {
         backendClient = new LocalLlmClient(
-          { baseUrl, apiKey, model: modelId, temperature: offloadConfig.temperature, timeoutMs: offloadConfig.backendTimeoutMs, stream: offloadConfig.stream },
+          {
+            baseUrl,
+            apiKey,
+            model: modelId,
+            protocol: offloadConfig.protocol ?? providerProtocol ??
+              (process.env.TDAI_LLM_PROTOCOL === "responses" ? "responses" : "openai"),
+            temperature: offloadConfig.temperature,
+            timeoutMs: offloadConfig.backendTimeoutMs,
+            stream: offloadConfig.stream,
+          },
           logger,
         );
       } else {

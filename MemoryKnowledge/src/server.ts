@@ -14,8 +14,8 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { swaggerUI } from "@hono/swagger-ui";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
 
 import { loadConfig } from "./config.js";
 import { createDb } from "./db/client.js";
@@ -140,7 +140,7 @@ async function startServer(): Promise<void> {
 }
 
 // Start server when run directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   void startServer().catch((err) => {
     log.error("Knowledge service failed to start", {
       error: err instanceof Error ? err.message : String(err),

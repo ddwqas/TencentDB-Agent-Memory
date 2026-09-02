@@ -68,6 +68,15 @@ deploy/global-images/.admin-key
 deploy/global-images/.proxy-config/
 deploy/global-images/.memory-core-config/
 
+# Windows 本地源码运行态
+deploy/local-source-windows/.admin-key
+deploy/local-source-windows/.runtime/
+
+# 本地源码 Docker 运行态（生成配置可能含 LLM / gateway 凭据）
+deploy/local-source-docker/.admin-key
+deploy/local-source-docker/.memory-core-config/
+deploy/local-source-docker/.proxy-config/
+
 # Eval scripts output
 scripts/eval-report.json
 

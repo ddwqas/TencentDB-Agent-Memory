@@ -629,6 +629,7 @@ export class TdaiCore {
     baseUrl: string;
     apiKey: string;
     model: string;
+    protocol: "openai" | "responses";
     maxTokens: number;
     timeoutMs: number;
     stream: boolean;
@@ -638,6 +639,7 @@ export class TdaiCore {
       baseUrl: resolved.baseUrl,
       apiKey: resolved.apiKey,
       model: resolved.model,
+      protocol: resolved.protocol ?? "openai",
       maxTokens: resolved.maxTokens ?? 4096,
       timeoutMs: resolved.timeoutMs ?? 120_000,
       stream: resolved.stream ?? false,
@@ -1006,6 +1008,7 @@ export class TdaiCore {
         baseUrl: runtimeLlm.baseUrl,
         apiKey: runtimeLlm.apiKey,
         model: runtimeLlm.model,
+        protocol: runtimeLlm.protocol,
         maxTokens: runtimeLlm.maxTokens,
         timeoutMs: runtimeLlm.timeoutMs,
         stream: runtimeLlm.stream,

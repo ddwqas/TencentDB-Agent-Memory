@@ -27,8 +27,8 @@ export interface LlmConfig {
    * Per-instance bindings always override this default.
    */
   mode: "proxy" | "custom";
-  /** LLM 协议：openai 走 /chat/completions，anthropic 走 /messages。默认 openai（向后兼容）。 */
-  protocol: "openai" | "anthropic";
+  /** LLM 协议：openai 走 Chat Completions，responses 走 Responses API。 */
+  protocol: "openai" | "responses" | "anthropic";
   provider: string;
   apiKey: string;
   model: string;
@@ -162,7 +162,10 @@ export function loadConfig(): ServiceConfig {
     clickhouse,
     llm: {
       mode: env("LLM_MODE", "proxy") === "custom" ? "custom" : "proxy",
-      protocol: env("LLM_PROTOCOL", "openai") === "anthropic" ? "anthropic" : "openai",
+      protocol: (() => {
+        const value = env("LLM_PROTOCOL", "openai");
+        return value === "anthropic" || value === "responses" ? value : "openai";
+      })(),
       provider: env("LLM_PROVIDER", "custom"),
       apiKey: env("LLM_API_KEY", ""),
       model: env("LLM_MODEL", "Memory-Model"),

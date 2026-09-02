@@ -22,6 +22,8 @@ export interface LocalLlmClientConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** OpenAI wire protocol. Defaults to Chat Completions. */
+  protocol?: "openai" | "responses";
   temperature?: number;
   timeoutMs?: number;
   /** 流式请求开关,透传给 callLlm。默认 false。 */
@@ -37,6 +39,7 @@ export class LocalLlmClient {
       baseUrl: cfg.baseUrl,
       apiKey: cfg.apiKey,
       model: cfg.model,
+      protocol: cfg.protocol,
       temperature: cfg.temperature ?? 0.2,
       timeoutMs: cfg.timeoutMs ?? 120_000,
       stream: cfg.stream,

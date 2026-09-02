@@ -7,6 +7,7 @@
 import { generateText, streamText } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { PluginLogger } from "../types.js";
+import { responsesCompatibleFetch } from "../../utils/responses-compatible-fetch.js";
 
 const TAG = "[context-offload] [local-llm]";
 
@@ -14,6 +15,8 @@ export interface LlmCallerConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** OpenAI wire protocol. Defaults to Chat Completions. */
+  protocol?: "openai" | "responses";
   temperature: number;
   timeoutMs: number;
   /**
@@ -59,11 +62,15 @@ export async function callLlm(
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
     compatibility: "compatible",
+    fetch: config.protocol === "responses" ? responsesCompatibleFetch : undefined,
   });
 
   try {
+    const model = config.protocol === "responses"
+      ? provider.responses(config.model)
+      : provider.chat(config.model);
     const callParams = {
-      model: provider.chat(config.model),
+      model,
       system: opts.systemPrompt,
       prompt: opts.userPrompt,
       temperature,

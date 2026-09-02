@@ -208,6 +208,8 @@ export interface StandaloneLLMOverrideConfig {
   apiKey: string;
   /** Model name (e.g. "gpt-4o", "deepseek-v3", "claude-sonnet-4-6"). */
   model: string;
+  /** OpenAI wire protocol. */
+  protocol: "openai" | "responses";
   /** Max output tokens (default: 4096). */
   maxTokens: number;
   /** Request timeout in milliseconds (default: 120000). */
@@ -254,6 +256,8 @@ export interface OffloadConfig {
   mode: "local" | "backend" | "client" | "collect";
   /** LLM model for offload tasks, format: "provider/model-id". Falls back to agents.defaults.model when omitted. */
   model?: string;
+  /** OpenAI wire protocol for local offload calls. Defaults to Chat Completions. */
+  protocol?: "openai" | "responses";
   /** LLM temperature (default: 0.2) */
   temperature: number;
   /**
@@ -530,6 +534,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
     enabled: bool(offloadGroup, "enabled") ?? false,
     mode: offloadMode,
     model: optStr(offloadGroup, "model"),
+    protocol: optStr(offloadGroup, "protocol") === "responses" ? "responses" : undefined,
     temperature: num(offloadGroup, "temperature") ?? 0.2,
     stream: bool(offloadGroup, "stream") ?? false,
     forceTriggerThreshold: num(offloadGroup, "forceTriggerThreshold") ?? 4,
@@ -646,6 +651,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
         baseUrl: str(llmGroup, "baseUrl") ?? "https://api.openai.com/v1",
         apiKey: str(llmGroup, "apiKey") ?? "",
         model: str(llmGroup, "model") ?? "gpt-4o",
+        protocol: str(llmGroup, "protocol") === "responses" ? "responses" : "openai",
         maxTokens: num(llmGroup, "maxTokens") ?? 4096,
         timeoutMs: num(llmGroup, "timeoutMs") ?? 120_000,
         provider,
