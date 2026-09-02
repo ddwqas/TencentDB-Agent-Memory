@@ -232,6 +232,19 @@ export function injectCodexAssets(
   return { ...body, input: newInput };
 }
 
+export function injectCodexAgentContext(
+  body: Record<string, unknown>,
+  agentContext: string,
+): Record<string, unknown> {
+  const instructions = typeof body.instructions === "string" ? body.instructions : "";
+  return {
+    ...body,
+    instructions: instructions.length > 0
+      ? `${instructions}\n\n${agentContext}`
+      : agentContext,
+  };
+}
+
 // ── Upstream request helpers ─────────────────────────────────────────────────
 
 function buildUpstreamHeaders(
@@ -386,8 +399,7 @@ export async function handleCodexEndpoint(
   // 存 initResult 的 agent/task detail 供 § 9 注入阶段构造 <session_context>。
   // handleSessionInit 内部本会通过 messages[0] 塞进 session_context，但那份
   // messages 是我们传进去的临时 synthesizedMessages，不会回到 codex body。
-  // 这里显式抓 detail，让下面合成 body 时用 buildSessionContextBlockWithToggles
-  // 造同款 block 并预填到合成 system message 前面。
+  // 这里显式抓 detail，Agent 写入 instructions，Task 保留在资产注入内容中。
   let cachedAgentDetail: unknown = null;
   let cachedTaskDetail: unknown = null;
 
@@ -830,8 +842,19 @@ export async function handleCodexEndpoint(
     }
   }
 
-  // ── 9. Asset injection (every turn, no caching) ────────────────────────────
+  // ── 9. Agent context + asset injection (every turn, no caching) ───────────
   // Only inject when session is initialized and not bypassed.
+  if (!injectionSkipped && sessionInfo && cachedAgentDetail) {
+    const { buildSessionContextBlockWithToggles } = await import("./session/context-injector.js");
+    const agentContext = buildSessionContextBlockWithToggles(
+      cachedAgentDetail as any,
+      null,
+      config.sessionInit,
+      sessionKey,
+    );
+    if (agentContext) body = injectCodexAgentContext(body, agentContext);
+  }
+
   //
   // Strategy: run the existing injection pipeline on a synthetic OpenAI-shaped
   // body (with an empty system message). The pipeline appends text blocks to
@@ -845,20 +868,11 @@ export async function handleCodexEndpoint(
       const { getInjectionPipeline } = await import("./injection/index.js");
       const pipeline = getInjectionPipeline(config);
 
-      // ── session_context 预填 ────────────────────────────────────────────────
-      // handleSessionInit 的 CB init 把 <session_context>（[Agent]+[Task] 描述）
-      // 塞进它内部持有的 messages[0]（我们传给它的临时数组），这份 messages
-      // 不会被返回给 codex handler；同时 initResult.systemAppend 只在 CC 分支
-      // 填充，CB 分支永远 undefined。结果 codex 侧只拿到 skill/memory/knowledge
-      // 段，**agent/task 描述完全没注入到最终 body 里**。
-      //
-      // 修法：直接用 buildSessionContextBlockWithToggles 从 handler 侧已经存好的
-      // agentDetail/taskDetail 构造同款 block，预填到合成 body 的 system
-      // message；下面 pipeline.process 会继续在同一 system message 后面 append
-      // 更多注入内容，最终 raw 模式一起抽出去 → developer 段包含 session_context。
+      // Task context 仍随资产注入内容进入 developer message；Agent context 已在
+      // 上方独立写入 body.instructions。
       const { buildSessionContextBlockWithToggles } = await import("./session/context-injector.js");
       const sessionContextBlock = buildSessionContextBlockWithToggles(
-        cachedAgentDetail as any,
+        null,
         cachedTaskDetail as any,
         config.sessionInit,
         sessionKey,
