@@ -160,9 +160,9 @@ export function renderKnowledgeToolsBlock(
 
   const resourceTags = resources
     .map((r) => {
-      // `match` 是 code-graph 的锚点判定依据：agent 拿它比对当前工作区的 git
-      // remote，命中才调用。优先用后端下发的 repo_slug；缺失时从 repo_url 降级
-      // 提取 `<org>/.../<repo>`。wiki 无 repo，不渲染该属性。
+      // `match` 是 code-graph 的仓库对应关系提示：agent 用它判断结果是当前
+      // 工程参考还是外部实现样例。优先用后端下发的 repo_slug；缺失时从
+      // repo_url 降级提取 `<org>/.../<repo>`。wiki 无 repo，不渲染该属性。
       const matchAttr = attr("match", r.repo_slug ?? deriveRepoSlug(r.repo_url));
       const branchAttr = attr("branch", r.repo_url ? (r.branch ?? "main") : undefined);
       // wiki 的 summary 是 LLM 依据页面标题生成的内容概述，是 agent 判断"该不该
@@ -178,9 +178,14 @@ export function renderKnowledgeToolsBlock(
     "**团队知识库资源**：code-graph 是仓库的预建代码索引（符号 / 调用图 / 结构），wiki 是工程设计文档。两类各有判据，见下。",
     "",
     "## code-graph：何时调",
-    "**前置条件**：资源的 match 与当前工作区对得上（比对 git remote / 仓库名）。对不上 → 该索引不是本仓的，用本地检索，不要试探性调用。",
+    "绑定的 code-graph 是当前 Agent 可使用的代码参考资产，用于理解已有实现、借鉴架构与代码组织、查找类似功能、追踪调用关系，以及评估改动影响。",
+    "它可能对应当前工程，也可能是团队中的其他代码库。match 只用于判断参考结果与当前工程的对应关系，不是调用权限或调用前置条件。",
     "",
-    "命中后，**凡是需要跨文件的结构 / 关系 / 广度信息就用它**，典型场景：",
+    "- match 与当前工程匹配：可以把查询结果作为当前工程的结构参考，辅助定位入口、调用链和影响范围。",
+    "- match 不匹配或无法确认：仍可以调用它作为外部实现样例，借鉴设计思路、API 使用方式和代码组织，但不要把其中的文件路径、符号关系、调用链或实现细节当作当前工程事实。",
+    "- 需要编辑当前工程的具体代码时：以本地工作区源码为准，CodeGraph 只提供参考，不自动复制代码，也不替代本地编译和验证。",
+    "",
+    "凡是需要跨文件的结构、关系或广度信息就可以用它，典型场景：",
     "- 熟悉项目、理解模块架构、找入口（冷启动）",
     "- 定位符号、文件、某个概念在哪实现",
     "- 追调用链、依赖关系、数据流",
@@ -194,10 +199,10 @@ export function renderKnowledgeToolsBlock(
     "## wiki：何时调",
     "wiki 是设计文档，**与工作区无对应关系，不需要锚点匹配**（没有 match 属性是正常的，不代表对不上）。按 about 属性判断内容是否相关即可。",
     "问「为什么这么设计 / 背景与权衡 / 某概念在团队里的定义 / 历史决策与踩过的坑 / 这个模块的设计意图」时用它——这些答案在代码里找不到。",
-    "代码怎么写的 → 用 code-graph；某段代码此刻的内容 → 读源码。",
+    "代码结构、类似实现和调用关系 → 用 code-graph；某段代码此刻的精确内容 → 读本地源码。",
     "",
     "## 意图 → 起手",
-    "架构 / 熟悉项目 → explore（一次返回沿途源码）；X 在哪 → search；只要单个符号的定义 → node；谁调用 X / X 调了谁 → callers / callees；改 X 的影响面 → search 后 impact；为什么这么设计 → wiki search 后 read_page。",
+    "架构 / 熟悉项目 / 借鉴类似实现 → explore（一次返回沿途源码）；X 在哪 → search；只要单个符号的定义 → node；谁调用 X / X 调了谁 → callers / callees；改 X 的影响面 → search 后 impact；为什么这么设计 → wiki search 后 read_page。",
     "组合：重构评估 = search → callers → impact。",
     "explore / node 返回的源码是逐字的，**不必对同一处再 Read 一遍**（除了上面那种要确认最新内容的情况）。",
     "",
