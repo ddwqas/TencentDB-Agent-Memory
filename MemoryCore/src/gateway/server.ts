@@ -19,7 +19,6 @@ import { join } from "node:path";
 import { URL } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import zlib from "node:zlib";
-import dayjs from "dayjs";
 import { generateText } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { TdaiCore } from "../core/tdai-core.js";
@@ -123,6 +122,7 @@ import type { PipelineWorker } from "../services/pipeline-worker.js";
 import type { StatefulPipelineManager } from "../utils/stateful-pipeline-manager.js";
 import type { PipelineLogger } from "../utils/pipeline-factory.js";
 import { parsePipelineTimerMember } from "../core/state/timer-member.js";
+import { formatLocalLogTime } from "../utils/log-time.js";
 
 const TAG = "[tdai-gateway]";
 const VERSION = "0.1.0";
@@ -131,25 +131,12 @@ const VERSION = "0.1.0";
 // Console logger (for standalone gateway — no OpenClaw logger available)
 // ============================
 
-/**
- * Format current time as ISO 8601 in the system's local timezone.
- *
- * Example: "2026-05-21T14:47:03.512+08:00"
- *
- * dayjs's `Z` token emits the local UTC offset (not a literal 'Z'), so the
- * wall-clock matches what the operator sees in `tmux` / `tail -f` while the
- * line stays ISO 8601 compliant and round-trippable.
- */
-function nowLocalIso(): string {
-  return dayjs().format("YYYY-MM-DDTHH:mm:ss.SSSZ");
-}
-
 function createConsoleLogger(): Logger {
   return {
-    debug: (msg: string) => console.debug(`${nowLocalIso()} DEBUG ${TAG} ${msg}`),
-    info: (msg: string) => console.info(`${nowLocalIso()} INFO  ${TAG} ${msg}`),
-    warn: (msg: string) => console.warn(`${nowLocalIso()} WARN  ${TAG} ${msg}`),
-    error: (msg: string) => console.error(`${nowLocalIso()} ERROR ${TAG} ${msg}`),
+    debug: (msg: string) => console.debug(`${formatLocalLogTime()} DEBUG ${TAG} ${msg}`),
+    info: (msg: string) => console.info(`${formatLocalLogTime()} INFO  ${TAG} ${msg}`),
+    warn: (msg: string) => console.warn(`${formatLocalLogTime()} WARN  ${TAG} ${msg}`),
+    error: (msg: string) => console.error(`${formatLocalLogTime()} ERROR ${TAG} ${msg}`),
   };
 }
 
@@ -658,22 +645,23 @@ export class TdaiGateway {
         (req as any).__skillPerfT0 = perfT0;
         const src = `${req.socket.remoteAddress ?? "?"}:${req.socket.remotePort ?? "?"}`;
         this.logger.info(
-          `[skill-perf] req.enter t=${perfT0} method=${req.method ?? "?"} url=${req.url} src=${src}`,
+          `[skill-perf] req.enter t=${formatLocalLogTime(new Date(perfT0))} method=${req.method ?? "?"} url=${req.url} src=${src}`,
         );
         res.on("finish", () => {
           const now = Date.now();
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const rid = (res as any).__skillReqId ?? "-";
           this.logger.info(
-            `[skill-perf] req.finish t=${now} total=${now - perfT0}ms status=${res.statusCode} req_id=${rid} url=${req.url}`,
+            `[skill-perf] req.finish t=${formatLocalLogTime(new Date(now))} total=${now - perfT0}ms status=${res.statusCode} req_id=${rid} url=${req.url}`,
           );
         });
         res.on("close", () => {
           if (!res.writableEnded) {
+            const now = Date.now();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const rid = (res as any).__skillReqId ?? "-";
             this.logger.warn(
-              `[skill-perf] req.close-before-end t=${Date.now()} elapsed=${Date.now() - perfT0}ms req_id=${rid} url=${req.url}`,
+              `[skill-perf] req.close-before-end t=${formatLocalLogTime(new Date(now))} elapsed=${now - perfT0}ms req_id=${rid} url=${req.url}`,
             );
           }
         });
@@ -691,7 +679,7 @@ export class TdaiGateway {
     // 在很短时间内多次触发这条 log = 反代/网关没复用连接）
     this.server.on("connection", (socket) => {
       this.logger.debug?.(
-        `[skill-perf] tcp.connect t=${Date.now()} src=${socket.remoteAddress ?? "?"}:${socket.remotePort ?? "?"}`,
+        `[skill-perf] tcp.connect t=${formatLocalLogTime()} src=${socket.remoteAddress ?? "?"}:${socket.remotePort ?? "?"}`,
       );
     });
 

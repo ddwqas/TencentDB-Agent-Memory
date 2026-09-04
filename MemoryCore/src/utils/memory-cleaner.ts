@@ -4,6 +4,7 @@ import path from "node:path";
 import type { IMemoryStore } from "../core/store/types.js";
 import { ManagedTimer } from "./managed-timer.js";
 import type { Logger } from "../core/types.js";
+import { formatLocalLogTime } from "./log-time.js";
 
 export interface MemoryCleanerOptions {
   baseDir: string;
@@ -53,7 +54,7 @@ export class LocalMemoryCleaner {
       `${TAG} Enabled: retentionDays=${this.opts.retentionDays}, cleanTime=${this.opts.cleanTime}, dirs=[${L0_DIR_NAME}, ${L1_DIR_NAME}]`,
     );
     this.opts.logger?.debug?.(
-      `${TAG} Runtime clock: nowLocal=${formatLocalDateTime(now)}, nowIso=${now.toISOString()}, tz=${tz}, utcOffset=${utcOffset}`,
+      `${TAG} Runtime clock: nowLocal=${formatLocalLogTime(now)}, tz=${tz}, utcOffset=${utcOffset}`,
     );
 
     this.scheduleNext();
@@ -116,7 +117,7 @@ export class LocalMemoryCleaner {
       try { totalL1 = await vectorStore.countL1(); } catch { /* non-fatal */ }
 
       this.opts.logger?.info(
-        `${TAG} [Pre-delete] cutoffIso=${cutoffIso}, retentionDays=${retentionDays}, totalL0=${totalL0}, totalL1=${totalL1}`,
+        `${TAG} [Pre-delete] cutoffLocal=${formatLocalLogTime(new Date(cutoffMs))}, retentionDays=${retentionDays}, totalL0=${totalL0}, totalL1=${totalL1}`,
       );
 
       let removedL0 = 0;
@@ -170,7 +171,7 @@ export class LocalMemoryCleaner {
       const remainingL1 = totalL1 - removedL1;
       const summary = {
         event: "cleaner_summary",
-        cutoffIso,
+        cutoffLocal: formatLocalLogTime(new Date(cutoffMs)),
         retentionDays,
         l0: { total: totalL0, expired: removedL0, remaining: remainingL0, skipped: skippedL0, failed: failedL0DbCleanup > 0 },
         l1: { total: totalL1, expired: removedL1, remaining: remainingL1, skipped: skippedL1, failed: failedL1DbCleanup > 0 },
@@ -194,13 +195,13 @@ export class LocalMemoryCleaner {
     const delayMs = Math.max(0, next - nowMs);
 
     this.opts.logger?.debug?.(
-      `${TAG} Schedule next run: nowLocal=${formatLocalDateTime(now)}, cleanTime=${this.opts.cleanTime}, targetTodayLocal=${formatLocalDateTime(new Date(targetToday))}, passedToday=${passedToday}, nextRunLocal=${formatLocalDateTime(new Date(next))}, nextRunIso=${new Date(next).toISOString()}, delayMs=${delayMs}`,
+      `${TAG} Schedule next run: nowLocal=${formatLocalLogTime(now)}, cleanTime=${this.opts.cleanTime}, targetTodayLocal=${formatLocalLogTime(new Date(targetToday))}, passedToday=${passedToday}, nextRunLocal=${formatLocalLogTime(new Date(next))}, delayMs=${delayMs}`,
     );
 
     this.timer.scheduleAt(next, () => {
       const firedAtMs = Date.now();
       this.opts.logger?.info(
-        `${TAG} Timer fired: scheduledLocal=${formatLocalDateTime(new Date(next))}, firedLocal=${formatLocalDateTime(new Date(firedAtMs))}, driftMs=${firedAtMs - next}`,
+        `${TAG} Timer fired: scheduledLocal=${formatLocalLogTime(new Date(next))}, firedLocal=${formatLocalLogTime(new Date(firedAtMs))}, driftMs=${firedAtMs - next}`,
       );
       void this.runAndReschedule();
     });
@@ -210,7 +211,7 @@ export class LocalMemoryCleaner {
     if (this.destroyed) return;
     const runStart = new Date();
     this.opts.logger?.info(
-      `${TAG} Cleanup tick start: nowLocal=${formatLocalDateTime(runStart)}, nowIso=${runStart.toISOString()}`,
+      `${TAG} Cleanup tick start: nowLocal=${formatLocalLogTime(runStart)}`,
     );
 
     try {
@@ -316,16 +317,6 @@ function extractShardDateFromFileName(
 function localDayEndMs(year: number, month: number, day: number): number {
   const end = new Date(year, month - 1, day, 23, 59, 59, 999);
   return end.getTime();
-}
-
-function formatLocalDateTime(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`;
 }
 
 function formatUtcOffset(offsetMinutes: number): string {

@@ -13,6 +13,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { formatLocalLogTime } from "../../utils/log-time.js";
 
 export interface FileLoggerConfig {
   /** 日志文件目录，如 /data/log/。为空时禁用文件写入。 */
@@ -95,7 +96,7 @@ export class FileLogger {
   // ─── 私有方法 ───
 
   private formatLine(level: string, message: string, data?: Record<string, unknown>): string {
-    const timestamp = new Date().toISOString();
+    const timestamp = formatLocalLogTime();
     let line = `[${timestamp}][${level}] ${message}`;
 
     if (data && Object.keys(data).length > 0) {

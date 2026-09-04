@@ -1,6 +1,8 @@
 /**
  * 元数据 API trace → stdout 单行 JSON（CLS 复用）。
  */
+import { formatLocalLogTime } from "../utils/log-time.js";
+
 export const API_TRACE_INTERFACE = "tdai-metadata-api";
 
 type StdoutWriter = (line: string) => void;
@@ -17,7 +19,7 @@ export function buildStdoutPayload(
 ): Record<string, string | number | boolean> {
   return {
     interface: API_TRACE_INTERFACE,
-    time: new Date().toISOString(),
+    time: formatLocalLogTime(),
     level: level.toUpperCase(),
     msg: event,
     profile,

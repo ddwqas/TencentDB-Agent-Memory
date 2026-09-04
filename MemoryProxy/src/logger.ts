@@ -15,6 +15,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import type { LogEntry, ProxyConfig } from "./types.js";
 import { log } from "./report/log.js";
+import { formatLocalLogTime } from "./report/log-time.js";
 import { writeClickHouse } from "./clickhouse.js";
 
 // ── JSONL file logger (usage events only) ─────────────────────────────────────
@@ -77,16 +78,8 @@ export function writeLog(config: ProxyConfig, entry: LogEntry): void {
 
 // ── Pipeline logger (console) ─────────────────────────────────────────────────
 
-/** Format timestamp as MM-DD HH:MM:SS.mmm for concise console output. */
 function ts(): string {
-  const now = new Date();
-  const mo = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  const h = String(now.getHours()).padStart(2, "0");
-  const mi = String(now.getMinutes()).padStart(2, "0");
-  const s = String(now.getSeconds()).padStart(2, "0");
-  const ms = String(now.getMilliseconds()).padStart(3, "0");
-  return `${mo}-${d} ${h}:${mi}:${s}.${ms}`;
+  return formatLocalLogTime();
 }
 
 /** Format elapsed ms into human readable string. */

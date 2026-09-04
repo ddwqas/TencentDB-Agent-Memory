@@ -15,6 +15,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { formatLocalLogTime } from "./log-time.js";
+import { writeStderrLog } from "./stderr-log.js";
 
 export interface FileLoggerConfig {
   /** Log file directory. Empty disables file logging. */
@@ -68,13 +70,13 @@ export class FileLogger {
       this.flushTimer.unref();
     } catch (err) {
       this.disabled = true;
-      process.stderr.write(`[file-logger] init failed: ${err}\n`);
+      writeStderrLog(`[file-logger] init failed: ${err}`);
     }
   }
 
   /**
    * Write a log line.
-   * Format: [ISO_TIMESTAMP][LEVEL] message {json_data}
+   * Format: [YYYY-MM-DD HH:mm:ss.SSS][LEVEL] message {json_data}
    */
   write(level: string, message: string, data?: Record<string, unknown>): void {
     if (this.disabled) return;
@@ -139,7 +141,7 @@ export class FileLogger {
   // ─── Private ───────────────────────────────────────────────────────────────
 
   private formatLine(level: string, message: string, data?: Record<string, unknown>): string {
-    const timestamp = new Date().toISOString();
+    const timestamp = formatLocalLogTime();
     let line = `[${timestamp}][${level}] ${message}`;
 
     if (data && Object.keys(data).length > 0) {
@@ -180,7 +182,7 @@ export class FileLogger {
     });
 
     this.stream.on("error", (err) => {
-      process.stderr.write(`[file-logger] stream error: ${err.message}\n`);
+      writeStderrLog(`[file-logger] stream error: ${err.message}`);
       this.disabled = true;
     });
   }
@@ -215,7 +217,7 @@ export class FileLogger {
       this.currentSize = 0;
       this.openStream();
     } catch (err) {
-      process.stderr.write(`[file-logger] rotate failed: ${err}\n`);
+      writeStderrLog(`[file-logger] rotate failed: ${err}`);
       this.disabled = true;
     }
   }

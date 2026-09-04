@@ -28,6 +28,7 @@ import { executeMemorySearch } from "../core/tools/memory-search.js";
 import { executeConversationSearch } from "../core/tools/conversation-search.js";
 import type { MemoryRecord } from "../core/record/l1-writer.js";
 import { reportRecallMetrics } from "../core/report/metric-tracking-recall.js";
+import { formatLocalLogTime } from "../utils/log-time.js";
 
 // ── Zod schemas (validated types + defaults) ──
 import {
@@ -536,10 +537,11 @@ export async function handleV2Route(
   const perfT0 = isSkillPerf ? ((req as any).__skillPerfT0 as number | undefined) ?? Date.now() : 0;
   // 把 request_id 挂到 res 上，让 server.ts 的 res.on('finish') 也能带上
   if (isSkillPerf) {
+    const now = Date.now();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (res as any).__skillReqId = requestId;
     deps.logger.info(
-      `[skill-perf] dispatch.enter req_id=${requestId} path=${pathname} t=${Date.now()} t0_offset=${Date.now() - perfT0}ms`,
+      `[skill-perf] dispatch.enter req_id=${requestId} path=${pathname} t=${formatLocalLogTime(new Date(now))} t0_offset=${now - perfT0}ms`,
     );
   }
   const perfMark = (phase: string, extraFields?: string) => {

@@ -23,6 +23,7 @@ import { ConsoleLogBackend } from "./backends/console.js";
 import { NoopLogBackend } from "./backends/noop.js";
 import type { ILogBackend, LogAttrs, LogConfig, LogLevel } from "./types.js";
 import { LOG_LEVEL_PRIORITY } from "./types.js";
+import { writeStderrLog } from "./stderr-log.js";
 
 // ─── Module State ────────────────────────────────────────────────────────────
 
@@ -53,7 +54,7 @@ export function initLogger(config: LogConfig, customBackend?: ILogBackend): void
         rotateBackupLimit: config.rotate.backupLimit,
       });
     } catch (err) {
-      process.stderr.write(`[log] failed to init file logger: ${err}\n`);
+      writeStderrLog(`[log] failed to init file logger: ${err}`);
     }
   }
 

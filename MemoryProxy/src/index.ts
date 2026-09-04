@@ -1,5 +1,9 @@
 /** Entry point: parse config, start server. */
 
+import { installConsoleLogTime } from "./report/console-log-time.js";
+
+installConsoleLogTime();
+
 if (!process.version.startsWith("v22.")) {
   console.error(`\x1b[31m[ERROR] Node.js version check failed!\x1b[0m`);
   console.error(`\x1b[31m[ERROR] Required Node.js version: v22.x\x1b[0m`);

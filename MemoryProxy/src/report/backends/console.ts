@@ -6,6 +6,7 @@
  */
 
 import type { ILogBackend, LogAttrs } from "../types.js";
+import { formatLocalLogTime } from "../log-time.js";
 
 const TAG = "";
 
@@ -46,14 +47,6 @@ export class ConsoleLogBackend implements ILogBackend {
   }
 
   private timestamp(): string {
-    const d = new Date();
-    const YY = String(d.getFullYear()).slice(2);
-    const MM = String(d.getMonth() + 1).padStart(2, "0");
-    const DD = String(d.getDate()).padStart(2, "0");
-    const h = String(d.getHours()).padStart(2, "0");
-    const m = String(d.getMinutes()).padStart(2, "0");
-    const s = String(d.getSeconds()).padStart(2, "0");
-    const ms = String(d.getMilliseconds()).padStart(3, "0");
-    return `${YY}-${MM}-${DD} ${h}:${m}:${s}.${ms}`;
+    return formatLocalLogTime();
   }
 }

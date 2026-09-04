@@ -91,7 +91,7 @@ export async function executeReadCos(
   }
 
   try {
-    logger?.info(`${TAG} [COS_TOOL_CALL] >>> path="${path}" timestamp=${new Date().toISOString()}`);
+    logger?.info(`${TAG} [COS_TOOL_CALL] >>> path="${path}"`);
     const obj = await storage.getObject(path);
 
     if (!obj) {
