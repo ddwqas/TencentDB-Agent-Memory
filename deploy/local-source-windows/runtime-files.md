@@ -6,9 +6,14 @@
 .runtime/
 ├─ config/       运行时配置
 ├─ data/         用户数据和索引
+├─ downloads/    便携 Node.js 的下载压缩包
 ├─ logs/         服务日志
-└─ processes/    服务进程记录
+├─ processes/    服务进程记录
+└─ tools/        解压后的便携 Node.js 22
 ```
+
+`downloads/` 和 `tools/` 都可安全删除；系统 Node.js 不是 22.x 时，下次构建或启动会自动
+重新下载。删除它们不会影响 `data/` 中的业务数据。
 
 ## config：运行时配置
 
@@ -73,4 +78,3 @@
 - 删除 `data/` 会删除用户数据；删除前应确认已完成备份。
 - 旧版 `wiki-sources.json` 中的绝对路径会在下一次启动时兼容读取，并在对应目录存在时迁移为相对路径。
 - `config/`、`logs/`、`processes/` 均可在服务停止后清理，下一次启动会重新创建必要文件。
-

@@ -3,6 +3,9 @@ param([switch]$SkipInstall)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_lib.ps1')
 
+Initialize-RuntimeDirectories
+$null = Use-Node22
+
 $coreDir = Join-Path $script:RepoRoot 'MemoryCore'
 $knowledgeDir = Join-Path $script:RepoRoot 'MemoryKnowledge'
 $panelDir = Join-Path $script:RepoRoot 'MemoryPanel'

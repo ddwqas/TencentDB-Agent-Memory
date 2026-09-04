@@ -3,9 +3,9 @@ $ErrorActionPreference = 'Stop'
 
 Import-DotEnv
 Initialize-RuntimeDirectories
+$node = Use-Node22
 Stop-TrackedProcesses -Quiet
 
-$node = (Get-Command node).Source
 $coreDir = Join-Path $script:RepoRoot 'MemoryCore'
 $knowledgeDir = Join-Path $script:RepoRoot 'MemoryKnowledge'
 $panelDir = Join-Path $script:RepoRoot 'MemoryPanel'

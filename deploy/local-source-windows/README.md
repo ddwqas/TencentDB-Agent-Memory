@@ -14,10 +14,15 @@
 ## 环境要求
 
 - Windows 10/11
-- Node.js 22.16 或更高版本
+- PowerShell 7（`pwsh`）
+- Windows x64；推荐预先安装 Node.js 22.16 或更高的 22.x 版本
 - npm
 - pnpm
 - Git
+
+`build.ps1` 和 `start-all.ps1` 会强制使用 Node.js 22。当前 Node 不是 22.x 时，脚本会从
+Node.js 官网下载最新的 Windows x64 ZIP，校验 SHA-256 后解压到 `.runtime/tools`。PATH
+只对当前脚本及其启动的子进程生效，不会修改系统 Node.js，也不影响其他工程使用 Node 24。
 
 依赖包含原生 Node.js 模块；没有对应预编译包时，需要安装 Visual Studio 2022 Build Tools 的“使用 C++ 的桌面开发”工作负载。
 

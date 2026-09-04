@@ -1,4 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0status.ps1" %*
+pwsh.exe -NoProfile -File "%~dp0status.ps1" %*
 exit /b %ERRORLEVEL%
-
