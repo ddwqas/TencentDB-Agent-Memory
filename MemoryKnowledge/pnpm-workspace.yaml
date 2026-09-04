@@ -1,0 +1,13 @@
+# pnpm 11 起，构建脚本白名单从 package.json 的 pnpm.onlyBuiltDependencies
+# 迁移到本文件的 allowBuilds。package.json 里那份仍保留，仅为兼容 pnpm 10
+# 及以下版本，pnpm 11 读取时会给出 ignored 警告，可忽略。
+#
+# 注意：pnpm install 一旦加上 --ignore-workspace，本文件会被整体忽略，
+# allowBuilds 随之失效，better-sqlite3 / esbuild 会被判定为未批准构建，
+# 安装以 ERR_PNPM_IGNORED_BUILDS 退出。deploy 脚本因此不再传该参数。
+#
+# 本机无父级 pnpm-workspace.yaml，故未声明 packages，仅根目录一个包。
+allowBuilds:
+  better-sqlite3: true  # 原生模块，必须构建，否则运行时加载 .node 失败
+  esbuild: true         # postinstall 负责安装平台二进制，缺失则无法打包
+  protobufjs: false     # 仅需生成可选的静态代码，运行时用不到

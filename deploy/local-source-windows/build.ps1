@@ -15,8 +15,8 @@ if (-not $SkipInstall) {
     Invoke-ProjectCommand $coreDir 'npm.cmd' @('rebuild', 'esbuild')
 
     Write-Info 'Installing MemoryKnowledge dependencies'
-    Invoke-ProjectCommand $knowledgeDir 'pnpm.cmd' @('install', '--ignore-workspace')
-
+    # Invoke-ProjectCommand $knowledgeDir 'pnpm.cmd' @('install', '--ignore-workspace')
+    Invoke-ProjectCommand $knowledgeDir 'pnpm.cmd' @('install')
     Write-Info 'Installing MemoryPanel dependencies'
     Invoke-ProjectCommand $panelDir 'pnpm.cmd' @('install', '--frozen-lockfile')
     Invoke-ProjectCommand $panelWebDir 'npm.cmd' @('ci', '--no-audit', '--no-fund')
