@@ -66,6 +66,7 @@ export function migrate(_db: Db, raw: Database.Database): void {
       internal_status TEXT,
       sync_error      TEXT,
       stats_json      TEXT,
+      metadata_json   TEXT NOT NULL DEFAULT '{}',
       version         INTEGER NOT NULL DEFAULT 0,
       last_sync_at    TEXT,
       created_at      TEXT NOT NULL,
@@ -75,7 +76,7 @@ export function migrate(_db: Db, raw: Database.Database): void {
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_kcg_team_repo_branch
       ON knowledge_code_graph(service_id, team_id, repo_url, branch)
-      WHERE deleted_at IS NULL;
+      WHERE deleted_at IS NULL AND metadata_json = '{}';
 
     CREATE INDEX IF NOT EXISTS idx_kcg_team_status
       ON knowledge_code_graph(service_id, team_id, status);
@@ -96,6 +97,7 @@ export function migrate(_db: Db, raw: Database.Database): void {
       internal_status TEXT,
       sync_error      TEXT,
       page_count      INTEGER,
+      metadata_json   TEXT NOT NULL DEFAULT '{}',
       version         INTEGER NOT NULL DEFAULT 0,
       last_sync_at    TEXT,
       created_at      TEXT NOT NULL,
@@ -156,8 +158,16 @@ export function migrate(_db: Db, raw: Database.Database): void {
   // so we check PRAGMA table_info first.
   addColumnIfMissing(raw, "knowledge_code_graph", "service_url", "TEXT");
   addColumnIfMissing(raw, "knowledge_code_graph", "summary", "TEXT");
+  addColumnIfMissing(raw, "knowledge_code_graph", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
   addColumnIfMissing(raw, "knowledge_wiki", "service_url", "TEXT");
   addColumnIfMissing(raw, "knowledge_wiki", "summary", "TEXT");
+  addColumnIfMissing(raw, "knowledge_wiki", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
+  // 普通 create 仍由唯一索引保证并发幂等；带 migration metadata 的导入行
+  // 不参与该索引，因此同 repo/branch 可以追加为多个独立快照。
+  raw.exec("DROP INDEX IF EXISTS idx_kcg_team_repo_branch");
+  raw.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_kcg_team_repo_branch
+    ON knowledge_code_graph(service_id, team_id, repo_url, branch)
+    WHERE deleted_at IS NULL AND metadata_json = '{}'`);
   // service_id on audit tables is nullable → safe to add to existing dev DBs.
   addColumnIfMissing(raw, "knowledge_wiki_audit", "service_id", "TEXT");
   addColumnIfMissing(raw, "knowledge_code_graph_audit", "service_id", "TEXT");

@@ -47,6 +47,7 @@ export interface SkillSummary {
   status: 'active' | 'archived';
   owner_user_id: string;
   owner_agent_id: string;
+  owner_scope: 'agent' | 'team';
   team_id: string;
   task_id: string;
   created_at_ms: number;
@@ -141,7 +142,8 @@ async function skillCall<T>(action: string, body: Record<string, unknown>, signa
 export function createSkill(params: {
   user_id: string;
   team_id: string;
-  agent_id: string;
+  agent_id?: string;
+  owner_scope?: 'agent' | 'team';
   task_id?: string;
   name: string;
   content: string;

@@ -6,8 +6,9 @@
  * Real wiki worker: LLM ingest via wiki engine.
  */
 
-import { join } from "node:path";
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import pLimit from "p-limit";
 
 import type { Db } from "./db/client.js";
@@ -126,6 +127,60 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
     let didIncrementalSync = false;
     let version: string | null = null;
 
+    const rebuildAndSwap = async (): Promise<void> => {
+      const parent = dirname(dir);
+      const leaf = basename(dir);
+      const token = randomUUID();
+      const stagingDir = join(parent, `.${leaf}.sync-${token}`);
+      const backupDir = join(parent, `.${leaf}.previous-${token}`);
+      let oldMoved = false;
+      let stagedInstance: CodeGraphInstance | undefined;
+      try {
+        mkdirSync(parent, { recursive: true });
+        setInternalStatus("cloning");
+        const res = await fetcher.fetch(repoUrl, branch, stagingDir);
+        version = res.version;
+
+        setInternalStatus("indexing");
+        stagedInstance = await indexProject(stagingDir);
+        // Windows cannot rename a directory while SQLite keeps a file handle open.
+        closeIndex(stagedInstance);
+        stagedInstance = undefined;
+
+        const oldInstance = instancePool.get(codeGraphId);
+        if (oldInstance) closeIndex(oldInstance);
+        instancePool.delete(codeGraphId);
+        if (existsSync(dir)) {
+          renameSync(dir, backupDir);
+          oldMoved = true;
+        }
+        try {
+          renameSync(stagingDir, dir);
+        } catch (err) {
+          if (oldMoved && existsSync(backupDir) && !existsSync(dir)) renameSync(backupDir, dir);
+          throw err;
+        }
+        oldMoved = false;
+        rmSync(backupDir, { recursive: true, force: true });
+        const instance = await openIndex(dir);
+        instancePool.set(codeGraphId, instance);
+      } catch (err) {
+        if (stagedInstance) closeIndex(stagedInstance);
+        if (oldMoved && existsSync(backupDir) && !existsSync(dir)) {
+          try { renameSync(backupDir, dir); } catch { /* leave recoverable backup in place */ }
+        }
+        if (!instancePool.get(codeGraphId) && existsSync(dir)) {
+          try {
+            instancePool.set(codeGraphId, await openIndex(dir));
+          } catch { /* next query/startup will retry */ }
+        }
+        throw err;
+      } finally {
+        rmSync(stagingDir, { recursive: true, force: true });
+        if (!oldMoved) rmSync(backupDir, { recursive: true, force: true });
+      }
+    };
+
     if (isExistingRepo) {
       try {
         setInternalStatus("fetching");
@@ -144,19 +199,11 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
         log.warn(
           `[code-graph] incremental sync failed for ${codeGraphId}, falling back to fresh clone: ${err instanceof Error ? err.message : String(err)}`,
         );
-        try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
     }
 
     if (!didIncrementalSync) {
-      mkdirSync(dir, { recursive: true });
-      setInternalStatus("cloning");
-      const res = await fetcher.fetch(repoUrl, branch, dir);
-      version = res.version;
-
-      setInternalStatus("indexing");
-      const instance = await indexProject(dir);
-      instancePool.set(codeGraphId, instance);
+      await rebuildAndSwap();
     }
 
     // commit hash comes from the fetcher's FetchResult (unified after clone / sync)
@@ -271,7 +318,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
       for (const row of allSyncedWikis) {
         const dir = join(dataDir, row.service_id, row.team_id, row.wiki_id);
         try {
-          wikiMgr.init({ name: row.wiki_id, path: dir });
+          wikiMgr.restore({ name: row.wiki_id, path: dir });
           const pages = wikiMgr.getPages(row.wiki_id);
           if (pages.length > 0) {
             store.updateWikiStatus(row.service_id, row.wiki_id, { page_count: pages.length });

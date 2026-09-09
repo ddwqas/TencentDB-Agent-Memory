@@ -26,6 +26,8 @@ import { createToolsRoutes } from "./routes/tools.js";
 import { createHealthRoutes } from "./routes/health.js";
 import { createLlmBindingRoutes } from "./routes/llm-binding.js";
 import { createAutoSyncRoutes } from "./routes/auto-sync.js";
+import { createMigrationRoutes } from "./routes/migration.js";
+import { KnowledgeSnapshotService } from "./migration/snapshot-service.js";
 import { accessLog } from "./middleware/response-envelope.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createLogger } from "./logger.js";
@@ -86,6 +88,13 @@ export function createApp() {
   api.route("/internal/llm-binding", createLlmBindingRoutes({
     llmBindingStore: knowledgeModule.llmBindingStore,
   }));
+  api.route("/internal/migration", createMigrationRoutes(new KnowledgeSnapshotService({
+    store: knowledgeModule.store,
+    wikiService: knowledgeModule.wikiService,
+    cgService: knowledgeModule.cgService,
+    wikiMgr: knowledgeModule.wikiMgr,
+    instancePool: knowledgeModule.instancePool,
+  }), config.publicBaseUrl));
 
   // auto-sync admin — 定时同步调度器状态查询 + 手动触发
   api.route("/", createAutoSyncRoutes({

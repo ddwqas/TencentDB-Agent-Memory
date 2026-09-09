@@ -4,6 +4,7 @@
  * Markdown 渲染统一走共享 AssetMarkdown。
  */
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Alert, Button, Card, Form, Input, Justify, MetricsBoard, Modal, SearchBox, Segment, Select, StatusTip, Table, Text } from 'tea-component';
 import { ChevronRightIcon, CodeIcon, DeleteIcon, RefreshIcon, UsergroupIcon, ViewListIcon, ViewModuleIcon } from 'tea-icons-react';
 import { knowledgeApi } from '@/lib/api/knowledge-api';
@@ -21,6 +22,7 @@ const { scrollable } = Table.addons;
 
 export default function CodeSourcesPanel() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const code = useCodeSources();
 
   const {
@@ -110,6 +112,7 @@ export default function CodeSourcesPanel() {
         actions={
           scopeTab !== 'fixed' ? (
             <>
+              <Button onClick={() => navigate('/migration')}>{t('menu.migration')}</Button>
               <Button
                 onClick={() => setAllocateTarget(selectedCodeAsset)}
                 disabled={!selectedCodeAsset}

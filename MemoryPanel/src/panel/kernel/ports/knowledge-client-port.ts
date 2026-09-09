@@ -11,6 +11,8 @@
  *    team/agent/user/task ID（归属由内核侧通过复合键解析）。
  */
 
+import type { Readable } from 'node:stream';
+
 // ── Wiki ──
 
 export interface WikiDetail {
@@ -151,9 +153,27 @@ export interface CodeGraphToolResult {
   isError: boolean;
 }
 
+export type KnowledgeSnapshotKind = 'wiki' | 'code_graph';
+
+export interface KnowledgeSnapshotDownload {
+  stream: Readable;
+  filename: string;
+  size: number | null;
+  sha256: string | null;
+}
+
+export interface KnowledgeSnapshotImportOptions {
+  teamId: string;
+  userId: string;
+  preferredName?: string;
+  provenance?: Record<string, unknown>;
+}
+
 // ── Port ──
 
 export interface KnowledgeClientPort {
+  snapshotExport(kind: KnowledgeSnapshotKind, id: string): Promise<KnowledgeSnapshotDownload>;
+  snapshotImport(kind: KnowledgeSnapshotKind, archivePath: string, options: KnowledgeSnapshotImportOptions): Promise<WikiDetail | CodeGraphDetail>;
   // Wiki — 资产层（create/list 带 IdFields；get/ingest/delete 仅资产 id 寻址）
   wikiCreate(teamId: string, name: string, userId?: string): Promise<WikiDetail>;
   wikiGet(wikiId: string): Promise<WikiDetail>;

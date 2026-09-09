@@ -262,6 +262,7 @@ function toSummary(s: Skill) {
     status: s.status,
     owner_user_id: s.user_id,
     owner_agent_id: s.owner_agent_id,
+    owner_scope: s.owner_scope,
     team_id: s.team_id,
     task_id: s.task_id,
     created_at_ms: s.created_at_ms,
@@ -308,15 +309,18 @@ export async function handleCreate(body: unknown, auth: V2AuthContext, requestId
     //   - 抛出异常 → create 请求整体返回错误。避免出现"skill 落库但 asset 缺失"
     //     的静默不一致状态（用户会疑惑"我创建成功了但看不到"）。
     //   - 与 v2-router.ts handleConversationAdd 里 ensureChatMemoryAsset 的做法一致。
-    if (deps.getMetadataService && r.team_id && r.owner_agent_id) {
+    if (deps.getMetadataService && r.team_id) {
       try {
         const metaSvc = await deps.getMetadataService(auth.serviceId);
-        await metaSvc.ensureSkillAsset({
-          skill_id: r.skill_id,
-          team_id: r.team_id,
-          agent_id: r.owner_agent_id,
-          name: r.name,
-        });
+        if (r.owner_scope === "team") {
+          await metaSvc.ensureTeamSkillAsset({
+            skill_id: r.skill_id, team_id: r.team_id, user_id: r.user_id, name: r.name,
+          });
+        } else if (r.owner_agent_id) {
+          await metaSvc.ensureSkillAsset({
+            skill_id: r.skill_id, team_id: r.team_id, agent_id: r.owner_agent_id, name: r.name,
+          });
+        }
       } catch (err) {
         deps.logger.error(
           `${TAG} ensureSkillAsset failed for ${r.skill_id}: ` +

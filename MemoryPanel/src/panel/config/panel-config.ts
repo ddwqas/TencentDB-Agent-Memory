@@ -30,6 +30,13 @@ export interface PanelConfig {
     sync: boolean;
     proxyBaseUrl: string;
   };
+  /** Ephemeral packages and retained JSON reports for append-only asset migration. */
+  migration: {
+    dir: string;
+    maxUploadBytes: number;
+    reportRetentionDays: number;
+    upstreamTimeoutMs: number;
+  };
   /** 默认 Agent 模板文件的本地存储目录根（存 Panel 本地，按 {dir}/{instanceId}/{team_id}/template.json）。 */
   agentTemplateDir: string;
 }
@@ -63,6 +70,12 @@ export function loadPanelConfig(): PanelConfig {
     knowledgeLlmBinding: {
       sync: envBool('KNOWLEDGE_LLM_BINDING_SYNC', true),
       proxyBaseUrl: env('KNOWLEDGE_LLM_PROXY_BASE_URL', 'http://127.0.0.1:8096'),
+    },
+    migration: {
+      dir: env('TDAI_MIGRATION_DIR', './data/migrations'),
+      maxUploadBytes: envInt('TDAI_MIGRATION_MAX_UPLOAD_BYTES', 4 * 1024 * 1024 * 1024),
+      reportRetentionDays: envInt('TDAI_MIGRATION_REPORT_RETENTION_DAYS', 30),
+      upstreamTimeoutMs: envInt('TDAI_MIGRATION_UPSTREAM_TIMEOUT_MS', 60 * 60 * 1000),
     },
     agentTemplateDir: env('TDAI_AGENT_TEMPLATE_DIR', './data/agent-templates'),
   };

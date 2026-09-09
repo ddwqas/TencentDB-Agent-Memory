@@ -7,6 +7,8 @@
  *
  * 与 HttpSkillClient 同模式：Bearer + service-id + envelope 解析。
  */
+import { createReadStream, statSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import { CoreUpstreamError } from '../../domain/errors.js';
 import type {
   KnowledgeClientPort,
@@ -30,6 +32,9 @@ import type {
   CodeGraphListResult,
   CodeGraphSyncResult,
   CodeGraphToolResult,
+  KnowledgeSnapshotKind,
+  KnowledgeSnapshotDownload,
+  KnowledgeSnapshotImportOptions,
 } from '../ports/knowledge-client-port.js';
 
 export interface KnowledgeClientConfig {
@@ -37,6 +42,7 @@ export interface KnowledgeClientConfig {
   authToken: string;
   serviceId?: string;
   timeoutMs?: number;
+  migrationTimeoutMs?: number;
 }
 
 interface CoreEnvelope<T> {
@@ -75,6 +81,81 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
         throw new CoreUpstreamError('CORE_UPSTREAM_ERROR', resp.status, json.message || `HTTP ${resp.status}`, 0);
       }
       return json.data as T;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private headers(contentType: string): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': contentType };
+    if (this.cfg.authToken) headers.Authorization = `Bearer ${this.cfg.authToken}`;
+    if (this.cfg.serviceId) headers['x-tdai-service-id'] = this.cfg.serviceId;
+    return headers;
+  }
+
+  private async upstreamError(resp: Response): Promise<never> {
+    let message = `HTTP ${resp.status}`;
+    let code = 0;
+    try {
+      const json = (await resp.json()) as CoreEnvelope<unknown>;
+      message = json.message || message;
+      code = json.code ?? 0;
+    } catch {
+      // Non-JSON upstream failure.
+    }
+    throw new CoreUpstreamError('CORE_UPSTREAM_ERROR', resp.status || 502, message, code);
+  }
+
+  async snapshotExport(kind: KnowledgeSnapshotKind, id: string): Promise<KnowledgeSnapshotDownload> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.cfg.migrationTimeoutMs ?? 60 * 60 * 1000);
+    try {
+      const resp = await fetch(`${this.cfg.baseUrl}/v3/internal/migration/export`, {
+        method: 'POST', headers: this.headers('application/json'),
+        body: JSON.stringify({ kind, id }), signal: ctrl.signal,
+      });
+      if (!resp.ok) return await this.upstreamError(resp);
+      if (!resp.body) throw new CoreUpstreamError('CORE_UPSTREAM_ERROR', 502, 'knowledge snapshot body is missing', 0);
+      const disposition = resp.headers.get('content-disposition') ?? '';
+      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `${kind}-${id}.zip`;
+      const sizeHeader = Number(resp.headers.get('content-length'));
+      return {
+        stream: Readable.fromWeb(resp.body as ReadableStream<Uint8Array>),
+        filename,
+        size: Number.isFinite(sizeHeader) && sizeHeader >= 0 ? sizeHeader : null,
+        sha256: resp.headers.get('x-tdai-snapshot-sha256'),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async snapshotImport(
+    kind: KnowledgeSnapshotKind,
+    archivePath: string,
+    options: KnowledgeSnapshotImportOptions,
+  ): Promise<WikiDetail | CodeGraphDetail> {
+    const query = new URLSearchParams({ kind, team_id: options.teamId, user_id: options.userId });
+    if (options.preferredName) query.set('preferred_name', options.preferredName);
+    const headers = this.headers('application/zip');
+    headers['Content-Length'] = String(statSync(archivePath).size);
+    if (options.provenance) {
+      headers['x-tdai-migration-provenance'] = Buffer.from(JSON.stringify(options.provenance)).toString('base64url');
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.cfg.migrationTimeoutMs ?? 60 * 60 * 1000);
+    try {
+      const init: RequestInit & { duplex: 'half' } = {
+        method: 'POST', headers, body: createReadStream(archivePath) as unknown as RequestInit['body'],
+        signal: ctrl.signal, duplex: 'half',
+      };
+      const resp = await fetch(`${this.cfg.baseUrl}/v3/internal/migration/import?${query.toString()}`, init);
+      if (!resp.ok) return await this.upstreamError(resp);
+      const json = (await resp.json()) as CoreEnvelope<WikiDetail | CodeGraphDetail>;
+      if (json.code !== 0 || !json.data) {
+        throw new CoreUpstreamError('CORE_UPSTREAM_ERROR', 502, json.message || 'knowledge import failed', json.code);
+      }
+      return json.data;
     } finally {
       clearTimeout(timer);
     }

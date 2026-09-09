@@ -293,6 +293,7 @@ export const skillSummarySchema = z.object({
 "description": z.optional(z.string()),
 "version": z.string(),
 "owner_user_id": z.optional(z.string()),
+"owner_scope": z.optional(z.enum(["agent", "team"])),
 "team_id": z.optional(z.string()),
 "agent_id": z.optional(z.string()),
 "source_type": z.optional(z.enum(["uploaded", "extracted_from_session", "extracted_from_task"])),

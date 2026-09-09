@@ -46,6 +46,7 @@ export interface CodeGraphRow {
   stats_json: string | null;
   service_url: string | null;
   summary: string | null;
+  metadata_json: string;
   version: number;
   last_sync_at: string | null;
   created_at: string;
@@ -65,6 +66,14 @@ export interface CreateCodeGraphInput {
   task_id?: string;
   visibility?: string;
   service_url?: string;
+}
+
+export interface ImportCodeGraphInput extends CreateCodeGraphInput {
+  commit_hash?: string | null;
+  stats_json?: string | null;
+  summary?: string | null;
+  last_sync_at?: string | null;
+  metadata_json?: string;
 }
 
 export interface CodeGraphStatusPatch {
@@ -104,6 +113,7 @@ export interface WikiRow {
   page_count: number | null;
   service_url: string | null;
   summary: string | null;
+  metadata_json: string;
   version: number;
   last_sync_at: string | null;
   created_at: string;
@@ -123,6 +133,13 @@ export interface CreateWikiInput {
   task_id?: string;
   visibility?: string;
   service_url?: string;
+}
+
+export interface ImportWikiInput extends CreateWikiInput {
+  page_count?: number | null;
+  summary?: string | null;
+  last_sync_at?: string | null;
+  metadata_json?: string;
 }
 
 export interface WikiStatusPatch {
@@ -210,6 +227,7 @@ export interface SyncedWikiRef {
 export interface IKnowledgeStore {
   // ── Code-Graph ──
   createCodeGraph(input: CreateCodeGraphInput): CreateResult<CodeGraphRow>;
+  importCodeGraph(input: ImportCodeGraphInput): CodeGraphRow;
   getCodeGraph(serviceId: string, teamId: string, codeGraphId: string): CodeGraphRow | null;
   getCodeGraphById(serviceId: string, codeGraphId: string): CodeGraphRow | null;
   listCodeGraphs(serviceId: string, teamId: string, opts?: ListOpts): CodeGraphRow[];
@@ -220,6 +238,7 @@ export interface IKnowledgeStore {
 
   // ── Wiki ──
   createWiki(input: CreateWikiInput): CreateResult<WikiRow>;
+  importWiki(input: ImportWikiInput): WikiRow;
   getWiki(serviceId: string, teamId: string, wikiId: string): WikiRow | null;
   getWikiById(serviceId: string, wikiId: string): WikiRow | null;
   listWikis(serviceId: string, teamId: string, opts?: ListOpts): WikiRow[];

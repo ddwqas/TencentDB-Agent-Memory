@@ -71,6 +71,7 @@ deploy/global-images/.memory-core-config/
 # Windows 本地源码运行态
 deploy/local-source-windows/.admin-key
 deploy/local-source-windows/.runtime/
+deploy/local-source-windows/.runtime-backups/
 
 # 本地源码 Docker 运行态（生成配置可能含 LLM / gateway 凭据）
 deploy/local-source-docker/.admin-key

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@react-sigma/core": "^5.0.6",
+    "@zip.js/zip.js": "^2.8.8",
     "graphology": "^0.26.0",
     "graphology-types": "^0.24.8",
     "graphology-communities-louvain": "^2.0.2",

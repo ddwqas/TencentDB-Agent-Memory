@@ -29,10 +29,12 @@ import type {
   SyncStatus,
   CodeGraphRow,
   CreateCodeGraphInput,
+  ImportCodeGraphInput,
   CodeGraphStatusPatch,
   CodeGraphMetaPatch,
   WikiRow,
   CreateWikiInput,
+  ImportWikiInput,
   WikiStatusPatch,
   WikiMetaPatch,
   AuditLogInput,
@@ -134,6 +136,30 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       }
     }
     throw new Error("createCodeGraph: failed to allocate unique id");
+  }
+
+  importCodeGraph(input: ImportCodeGraphInput): CodeGraphRow {
+    const ts = nowIso();
+    for (let attempt = 0; attempt < ID_RETRY; attempt++) {
+      const id = genCodeGraphId();
+      try {
+        this.db.insert(knowledgeCodeGraph).values({
+          codeGraphId: id, serviceId: input.service_id, teamId: input.team_id,
+          repoName: input.repo_name ?? "", repoUrl: input.repo_url, branch: input.branch,
+          commitHash: input.commit_hash ?? null, ownerUserId: input.owner_user_id ?? null,
+          userId: input.user_id ?? null, agentId: null, taskId: null,
+          visibility: input.visibility ?? "team", status: "ready", internalStatus: null,
+          syncError: null, statsJson: input.stats_json ?? null, serviceUrl: input.service_url ?? null,
+          summary: input.summary ?? null, metadataJson: input.metadata_json ?? "{}",
+          version: CODE_DATA_VERSION, lastSyncAt: input.last_sync_at ?? ts,
+          createdAt: ts, updatedAt: ts,
+        }).run();
+        return this.getCodeGraphById(input.service_id, id)!;
+      } catch (err) {
+        if (!isUniqueViolation(err) || attempt === ID_RETRY - 1) throw err;
+      }
+    }
+    throw new Error("importCodeGraph: failed to allocate unique id");
   }
 
   getCodeGraph(serviceId: string, teamId: string, codeGraphId: string): CodeGraphRow | null {
@@ -326,6 +352,30 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       }
     }
     throw new Error("createWiki: failed to allocate unique id");
+  }
+
+  importWiki(input: ImportWikiInput): WikiRow {
+    const ts = nowIso();
+    for (let attempt = 0; attempt < ID_RETRY; attempt++) {
+      const id = genWikiId();
+      try {
+        this.db.insert(knowledgeWiki).values({
+          wikiId: id, serviceId: input.service_id, teamId: input.team_id,
+          name: input.name, sourceType: input.source_type ?? null, sourceUrl: input.source_url ?? null,
+          ownerUserId: input.owner_user_id ?? null, userId: input.user_id ?? null,
+          agentId: null, taskId: null, visibility: input.visibility ?? "team",
+          status: "ready", internalStatus: null, syncError: null,
+          pageCount: input.page_count ?? null, serviceUrl: input.service_url ?? null,
+          summary: input.summary ?? null, metadataJson: input.metadata_json ?? "{}",
+          version: WIKI_DATA_VERSION, lastSyncAt: input.last_sync_at ?? ts,
+          createdAt: ts, updatedAt: ts,
+        }).run();
+        return this.getWikiById(input.service_id, id)!;
+      } catch (err) {
+        if (!isUniqueViolation(err) || attempt === ID_RETRY - 1) throw err;
+      }
+    }
+    throw new Error("importWiki: failed to allocate unique id");
   }
 
   getWiki(serviceId: string, teamId: string, wikiId: string): WikiRow | null {
@@ -613,6 +663,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       stats_json: r.statsJson,
       service_url: r.serviceUrl ?? null,
       summary: r.summary ?? null,
+      metadata_json: r.metadataJson ?? "{}",
       version: r.version,
       last_sync_at: r.lastSyncAt,
       created_at: r.createdAt,
@@ -640,6 +691,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       page_count: r.pageCount,
       service_url: r.serviceUrl ?? null,
       summary: r.summary ?? null,
+      metadata_json: r.metadataJson ?? "{}",
       version: r.version,
       last_sync_at: r.lastSyncAt,
       created_at: r.createdAt,

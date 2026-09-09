@@ -82,7 +82,7 @@ const VECTOR_INDEX_HNSW: Record<string, unknown> = {
 /** 查询时返回的字段 (全部, vector/sparse_vector 除外) */
 const SKILL_OUTPUT_FIELDS: string[] = [
   "id", "skill_id", "version", "is_head",
-  "team_id", "owner_agent_id", "user_id", "task_id",
+  "team_id", "owner_agent_id", "owner_scope", "user_id", "task_id",
   "name", "description", "content", "content_hash",
   "manifest_json", "storage_dir", "status", "metadata_json",
   "created_at_ms", "updated_at_ms",
@@ -203,6 +203,7 @@ export class TcvdbSkillStore implements ISkillStore {
     }
 
     const ownerForRow = head ? head.owner_agent_id : (input.owner_agent_id ?? "default");
+    const ownerScopeForRow = head ? head.owner_scope : (input.owner_scope ?? "agent");
     const userIdForRow = input.user_id ?? "default";
     const ts = this.now();
     const rowId = this.ulid();
@@ -216,6 +217,7 @@ export class TcvdbSkillStore implements ISkillStore {
       is_head: 1,
       team_id: tid,
       owner_agent_id: ownerForRow,
+      owner_scope: ownerScopeForRow,
       user_id: userIdForRow,
       task_id: input.task_id ?? "default",
       name: input.name,
@@ -544,6 +546,7 @@ export class TcvdbSkillStore implements ISkillStore {
         { fieldName: "is_head",        fieldType: "uint64", indexType: "filter" },
         { fieldName: "team_id",        fieldType: "string", indexType: "filter" },
         { fieldName: "owner_agent_id", fieldType: "string", indexType: "filter" },
+        { fieldName: "owner_scope",    fieldType: "string", indexType: "filter" },
         { fieldName: "user_id",        fieldType: "string", indexType: "filter" },
         { fieldName: "task_id",        fieldType: "string", indexType: "filter" },
         { fieldName: "name",           fieldType: "string", indexType: "filter" },
@@ -824,6 +827,7 @@ export class TcvdbSkillStore implements ISkillStore {
       is_head: (doc.is_head as number) === 1,
       user_id: doc.user_id as string,
       owner_agent_id: doc.owner_agent_id as string,
+      owner_scope: doc.owner_scope === "team" ? "team" : "agent",
       team_id: doc.team_id as string,
       task_id: doc.task_id as string,
       name: doc.name as string,
@@ -848,6 +852,7 @@ export class TcvdbSkillStore implements ISkillStore {
       is_head: skill.is_head ? 1 : 0,
       team_id: skill.team_id,
       owner_agent_id: skill.owner_agent_id,
+      owner_scope: skill.owner_scope,
       user_id: skill.user_id,
       task_id: skill.task_id,
       name: skill.name,

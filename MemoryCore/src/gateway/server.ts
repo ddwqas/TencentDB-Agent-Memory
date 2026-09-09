@@ -358,22 +358,23 @@ export class TdaiGateway {
         // v1 首创前置 await：抛异常 = create 失败（避免「skill 已落库但 asset
         // 缺失」的静默不一致）。standalone 模式下唯一的登记入口除了 handler 层的
         // handleCreate 兜底之外就是这里 —— 无论谁调 SkillCore.create 都能触发。
-        onSkillCreated: async ({ skill_id, team_id, agent_id, name }) => {
-          if (!team_id || !agent_id) return; // 无租户上下文 → 跳过（OpenClaw local scope 等）
+        onSkillCreated: async ({ skill_id, team_id, agent_id, user_id, name, owner_scope }) => {
+          if (!team_id) return; // 无租户上下文 → 跳过（OpenClaw local scope 等）
           const metaSvc = await gatewayRef.ensureMetadataService(skillAssetInstanceId);
-          await metaSvc.ensureSkillAsset({ skill_id, team_id, agent_id, name });
+          if (owner_scope === "team" && user_id) {
+            await metaSvc.ensureTeamSkillAsset({ skill_id, team_id, user_id, name });
+          } else if (agent_id) {
+            await metaSvc.ensureSkillAsset({ skill_id, team_id, agent_id, name });
+          }
         },
         // 读时自愈：fire-and-forget，异常吞掉。补历史 / 迁移 / 误删产生的孤儿 skill。
         onSkillAccessed: (skill) => {
-          if (!skill.team_id || !skill.owner_agent_id) return;
+          if (!skill.team_id) return;
           gatewayRef
             .ensureMetadataService(skillAssetInstanceId)
-            .then((svc) => svc.ensureSkillAsset({
-              skill_id: skill.skill_id,
-              team_id: skill.team_id!,
-              agent_id: skill.owner_agent_id!,
-              name: skill.name,
-            }))
+            .then((svc) => skill.owner_scope === "team"
+              ? svc.ensureTeamSkillAsset({ skill_id: skill.skill_id, team_id: skill.team_id!, user_id: skill.user_id, name: skill.name })
+              : svc.ensureSkillAsset({ skill_id: skill.skill_id, team_id: skill.team_id!, agent_id: skill.owner_agent_id, name: skill.name }))
             .catch((err: unknown) => {
               gatewayRef.logger.warn(
                 `[skill-asset-sync] ensureSkillAsset(access) failed for ${skill.skill_id}: `
@@ -1912,10 +1913,14 @@ export class TdaiGateway {
       onSkillVdbChanged: (delta: number) => {
         quotaMgr?.reportUsage(instanceId, delta, 0, "Skill").catch(() => {});
       },
-      onSkillCreated: async ({ skill_id, team_id, agent_id, name }) => {
-        if (!team_id || !agent_id) return;
+      onSkillCreated: async ({ skill_id, team_id, agent_id, user_id, name, owner_scope }) => {
+        if (!team_id) return;
         const metaSvc = await resolveMetaSvc();
-        await metaSvc.ensureSkillAsset({ skill_id, team_id, agent_id, name });
+        if (owner_scope === "team" && user_id) {
+          await metaSvc.ensureTeamSkillAsset({ skill_id, team_id, user_id, name });
+        } else if (agent_id) {
+          await metaSvc.ensureSkillAsset({ skill_id, team_id, agent_id, name });
+        }
       },
     });
 
@@ -1925,14 +1930,11 @@ export class TdaiGateway {
       resources: skillResources,
       versioning: skillVersioning,
       onSkillAccessed: (skill) => {
-        if (!skill.team_id || !skill.owner_agent_id) return;
+        if (!skill.team_id) return;
         resolveMetaSvc()
-          .then((svc) => svc.ensureSkillAsset({
-            skill_id: skill.skill_id,
-            team_id: skill.team_id,
-            agent_id: skill.owner_agent_id,
-            name: skill.name,
-          }))
+          .then((svc) => skill.owner_scope === "team"
+            ? svc.ensureTeamSkillAsset({ skill_id: skill.skill_id, team_id: skill.team_id, user_id: skill.user_id, name: skill.name })
+            : svc.ensureSkillAsset({ skill_id: skill.skill_id, team_id: skill.team_id, agent_id: skill.owner_agent_id, name: skill.name }))
           .catch((err: unknown) => {
             logger.warn(
               `[skill-asset-sync] ensureSkillAsset(access) failed for ${skill.skill_id}: `

@@ -4,6 +4,7 @@
  * 展示小组件 / 常量工具 / 共享 Markdown 分别独立收口。
  */
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button, Card, Form, Input, Justify, MetricsBoard, Modal, SearchBox, Segment, Select, StatusTip, Table, Text } from 'tea-component';
 import { BooksIcon, ChevronRightIcon, UsergroupIcon, ViewListIcon, ViewModuleIcon } from 'tea-icons-react';
 import { knowledgeApi } from '@/lib/api/knowledge-api';
@@ -22,6 +23,7 @@ const { scrollable } = Table.addons;
 
 export default function WikiSourcesPanel() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const wiki = useWikiSources();
 
   const {
@@ -113,9 +115,12 @@ export default function WikiSourcesPanel() {
           // 创建（新增团队池资产）与 memory/skill 对齐，放右上角 header；
           // 仅「团队资产」tab 开放，固定资产 tab 只做绑定/查看。
           scopeTab !== 'fixed' ? (
-            <Button type="primary" onClick={() => setShowCreate(true)} data-guide="create-wiki">
-              {t('wiki.create')}
-            </Button>
+            <>
+              <Button onClick={() => navigate('/migration')}>{t('menu.migration')}</Button>
+              <Button type="primary" onClick={() => setShowCreate(true)} data-guide="create-wiki">
+                {t('wiki.create')}
+              </Button>
+            </>
           ) : undefined
         }
       />

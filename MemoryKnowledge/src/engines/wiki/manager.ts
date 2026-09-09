@@ -163,6 +163,8 @@ export interface WikiSourceManager {
   readPage(name: string, relPath: string): string | null;
   getPages(name: string): WikiPage[];
   init(config: WikiSourceConfig): WikiSourceState;
+  /** Register an imported on-disk snapshot without rebuilding its index. */
+  restore(config: WikiSourceConfig): WikiSourceState;
   ingest(name: string, llmConfig: any, opts?: IngestExecOptions): Promise<any[]>;
 }
 
@@ -946,9 +948,8 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
   // Persist once after startup so legacy absolute paths are migrated when
   // their project directory is available at the new location.
   if (sources.size > 0) persist();
-  // 启动时恢复 BM25 搜索索引（重建每个 ready wiki 的 index.db / pagesMap / searchEngines）。
-  // loadState 只恢复元数据（sources map）；索引数据虽持久，但为对齐磁盘正文并避免
-  // search / pages / graph 在重启后返回空，仍从磁盘扫描重建一次。
+  // 启动时挂载现有索引。index.db 是 Wiki 快照的一部分；启动恢复不得重建或改写它。
+  // 查询侧会从 index.db 按需构造内存读模型，正文页只需扫描以恢复 pageCount。
   log.info("Restoring wiki indexes", { count: sources.size });
   let restored = 0;
   let failed = 0;
@@ -957,19 +958,20 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
       log.debug("Skip non-ready wiki source", { name, status: state.status });
       continue;
     }
-    const wikiDir = join(state.path, "wiki");
-    if (!existsSync(wikiDir)) {
-      log.warn("Wiki dir missing on disk; mark error and skip restore", { name, path: state.path });
+    const indexPath = join(state.path, "index.db");
+    if (!existsSync(indexPath)) {
+      log.warn("Wiki index missing on disk; mark error and skip restore", { name, path: state.path });
       state.status = "error";
-      state.error = `wiki dir not found: ${wikiDir}`;
+      state.error = `index.db not found: ${indexPath}`;
       failed++;
       continue;
     }
     try {
       const pages = scanWikiDir(state.path);
-      rebuildIndex(name, pages);
+      state.pageCount = pages.length;
+      state.error = undefined;
       restored++;
-      log.info("Restored wiki index", { name, pageCount: pages.length });
+      log.info("Mounted wiki index", { name, pageCount: pages.length });
     } catch (err) {
       failed++;
       log.error("Failed to restore wiki index", { name, error: err instanceof Error ? err.message : String(err) });
@@ -1014,6 +1016,25 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
   function init(config: WikiSourceConfig): WikiSourceState {
     initWikiProject(config.path);
     return register(config);
+  }
+
+  function restore(config: WikiSourceConfig): WikiSourceState {
+    const existing = sources.get(config.name);
+    if (existing) return existing;
+    if (!existsSync(join(config.path, "index.db"))) {
+      throw new Error(`index.db missing: ${config.path}`);
+    }
+    const pages = scanWikiDir(config.path);
+    const state: WikiSourceState = {
+      name: config.name,
+      path: config.path,
+      status: "ready",
+      pageCount: pages.length,
+      lastSyncAt: new Date().toISOString(),
+    };
+    sources.set(config.name, state);
+    persist();
+    return state;
   }
 
   async function ingest(name: string, llmConfig: any, opts?: IngestExecOptions): Promise<any[]> {
@@ -1085,7 +1106,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
   }
 
   return {
-    register, sync, init, ingest,
+    register, sync, init, restore, ingest,
     get: (name) => sources.get(name),
     list: () => [...sources.values()],
     remove: (name) => {

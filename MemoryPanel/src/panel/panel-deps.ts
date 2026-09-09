@@ -13,6 +13,7 @@ import type { KnowledgeClientPort } from './kernel/ports/knowledge-client-port.j
 import { HttpKnowledgeClient } from './kernel/adapters/http-knowledge-client.js';
 import { KnowledgeTaskRegistry } from './state/knowledge-task-registry.js';
 import { IngestProgressStore } from './state/ingest-progress-store.js';
+import { MigrationJobStore } from './state/migration-job-store.js';
 
 export interface PanelDeps {
   config: PanelConfig;
@@ -27,6 +28,7 @@ export interface PanelDeps {
   knowledgeTaskRegistry: KnowledgeTaskRegistry;
   /** Wiki ingest 细粒度进度（KS ingest_progress 回调写入；wiki/get 聚合读出）。 */
   ingestProgressStore: IngestProgressStore;
+  migrationJobStore: MigrationJobStore;
 }
 
 export function buildPanelDeps(config: PanelConfig): PanelDeps {
@@ -43,10 +45,12 @@ export function buildPanelDeps(config: PanelConfig): PanelDeps {
       authToken: config.knowledge.authToken,
       serviceId: instanceId,
       timeoutMs: config.knowledge.timeoutMs,
+      migrationTimeoutMs: config.migration.upstreamTimeoutMs,
     });
   const skillKernel = new FetchSkillKernelAdapter(kernelHttp, config.metadataRemoteTimeoutMs);
   const knowledgeTaskRegistry = new KnowledgeTaskRegistry();
   const ingestProgressStore = new IngestProgressStore();
+  const migrationJobStore = new MigrationJobStore(config.migration.dir, config.migration.reportRetentionDays);
   return {
     config,
     logger,
@@ -57,6 +61,7 @@ export function buildPanelDeps(config: PanelConfig): PanelDeps {
     skillKernel,
     knowledgeTaskRegistry,
     ingestProgressStore,
+    migrationJobStore,
   };
 }
 

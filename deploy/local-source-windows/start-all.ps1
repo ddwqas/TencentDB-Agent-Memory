@@ -199,6 +199,7 @@ try {
             KNOWLEDGE_LLM_BINDING_SYNC = '0'
             KNOWLEDGE_LLM_PROXY_BASE_URL = $proxyUrl
             TDAI_AGENT_TEMPLATE_DIR = (Join-Path $script:DataDir 'knowledge\agent-templates')
+            TDAI_MIGRATION_DIR = (Join-Path $script:DataDir 'panel\migrations')
             LOG_LEVEL = 'info'
             LOG_FORMAT = 'pretty'
         }

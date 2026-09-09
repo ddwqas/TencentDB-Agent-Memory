@@ -93,7 +93,13 @@ export const createRequestSchema = z.object({
   content: z.string().min(1),
   resources: z.array(skillResourcePayloadSchema).max(100).optional(),
   metadata: z.record(z.string(), z.any()).optional(),
-}).superRefine(refineAgentNeedsTeam);
+  owner_scope: z.enum(["agent", "team"]).optional(),
+}).superRefine((data, ctx) => {
+  refineAgentNeedsTeam(data, ctx);
+  if (data.owner_scope === "team" && (!data.team_id || !data.user_id)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "team-owned skill requires team_id and user_id", path: ["owner_scope"] });
+  }
+});
 
 export const updateRequestSchema = z.object({
   ...idFieldsShape,

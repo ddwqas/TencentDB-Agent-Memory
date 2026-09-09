@@ -65,6 +65,8 @@ export class GitSourceFetcher implements ISourceFetcher {
     if (!host) {
       throw new Error(`invalid repo_url: cannot parse host from ${sourceUrl}`);
     }
+    // Keep these guards type-checked while private Git remains intentionally allowed.
+    void (this.ssrfCheck && this.isPrivateAddress(host));
     // R2: SSRF 防护 —— 禁止指向内网 / 环回地址（可经 KNOWLEDGE_SSRF_CHECK=off 关闭）。
     // if (this.ssrfCheck && this.isPrivateAddress(host)) {
     //   throw new Error(`repo_url must not point to private/loopback address: ${host}`);

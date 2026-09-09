@@ -124,6 +124,11 @@ export class CodeGraphService {
     return join(this.dataRoot, serviceId, teamId, codeGraphId);
   }
 
+  /** 导出快照前释放索引句柄；后续查询会按需重新打开。 */
+  releaseForSnapshot(codeGraphId: string): void {
+    this.releaseInstance?.(codeGraphId);
+  }
+
   /**
    * 幂等创建并异步建图。
    * - 已存在（同 memory+team+repo+branch）→ 直接返回已有行，不重复建图。

@@ -26,6 +26,7 @@
  *
  */
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Button, Select, Segment } from 'tea-component';
 import { DeleteIcon } from 'tea-icons-react';
 import { tea } from '@/lib/tea-bridge';
@@ -54,6 +55,7 @@ export default function SkillsPanel({
   isAdmin: boolean;
 }) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const store = useSkillsPanel();
 
   const {
@@ -130,6 +132,7 @@ export default function SkillsPanel({
         }
         actions={
           <>
+            <Button onClick={() => navigate('/migration')}>{t('menu.migration')}</Button>
             {(() => {
               const canFork = tab === 'team' && !!selectedSkillId;
               const tooltip =

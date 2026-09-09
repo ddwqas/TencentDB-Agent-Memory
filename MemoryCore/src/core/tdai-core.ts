@@ -75,6 +75,7 @@ import type {
   ExtractorLLMRunner,
 } from "./skill/index.js";
 import type { Skill } from "./skill/types.js";
+import type { SkillOwnerScope } from "./skill/types.js";
 
 const TAG = "[memory-tdai] [core]";
 
@@ -106,6 +107,7 @@ export interface SkillAssetHooks {
     user_id?: string;
     name: string;
     description: string;
+    owner_scope: SkillOwnerScope;
   }) => Promise<void>;
   onSkillAccessed?: (skill: Skill) => void;
   onSkillArchived?: (params: { skill_id: string; team_id?: string }) => void;

@@ -19,7 +19,7 @@ import type { ISkillStore } from "./skill-store.interface.js";
 import { IdempotentNoOpError, SkillStoreError } from "./skill-store.js";
 import { SkillResourceStore, SkillResourceError, type SkillResourcePayload } from "./skill-resource-store.js";
 import type { StorageAdapter } from "../storage/adapter.js";
-import type { SkillManifestEntry, Skill } from "./types.js";
+import type { SkillManifestEntry, Skill, SkillOwnerScope } from "./types.js";
 
 function computeContentHash(content: string): string {
   return createHash("md5").update(content, "utf-8").digest("hex");
@@ -74,6 +74,7 @@ export interface SkillVersioningOptions {
     user_id?: string;
     name: string;
     description: string;
+    owner_scope: SkillOwnerScope;
   }) => Promise<void>;
 }
 
@@ -119,6 +120,7 @@ export class SkillVersioning {
     ownerAgentId: string,
     ctx: AppendVersionContext,
     mut: AppendVersionMutation,
+    ownerScope: SkillOwnerScope = "agent",
   ): Promise<Skill> {
     const newVersion = 1;
     const storageDir = this.resources.versionDir(skillId, newVersion);
@@ -159,6 +161,7 @@ export class SkillVersioning {
         manifest,
         storage_dir: storageDir,
         owner_agent_id: ownerAgentId,
+        owner_scope: ownerScope,
         metadata_json: mut.metadata_json,
       });
     } catch (e) {
@@ -178,6 +181,7 @@ export class SkillVersioning {
           user_id: ctx.user_id,
           name: mut.name,
           description: mut.description,
+          owner_scope: ownerScope,
         });
       } catch (assetErr) {
         // 反向删 skill DB。deleteSkill 本身也可能失败（DB 挂了），
@@ -288,6 +292,7 @@ export class SkillVersioning {
         manifest,
         storage_dir: newStorageDir,
         owner_agent_id: head.owner_agent_id,
+        owner_scope: head.owner_scope,
         metadata_json: mut.metadata_json ?? head.metadata_json,
       });
       this.onSkillVdbChanged?.(1);

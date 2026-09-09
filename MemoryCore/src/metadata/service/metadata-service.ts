@@ -1409,6 +1409,38 @@ export class MetadataService {
     return asset;
   }
 
+  /** 登记真正的团队级 Skill：owner 是当前用户，不创建 Agent fixed-asset 绑定。 */
+  async ensureTeamSkillAsset(params: {
+    skill_id: string;
+    team_id: string;
+    user_id: string;
+    name: string;
+  }): Promise<AssetEntity> {
+    const assetId = params.skill_id;
+    let asset = await this.getAssetById(assetId);
+    if (!asset) {
+      try {
+        asset = await this.createAsset({
+          asset_id: assetId,
+          team_id: params.team_id,
+          asset_type: "skill",
+          name: params.name,
+          owner_user_id: params.user_id,
+          source_type: "migration",
+          visibility: "team",
+          status: "active",
+          metadata_json: JSON.stringify({ owner_scope: "team" }),
+        });
+      } catch (err) {
+        const raced = await this.getAssetById(assetId);
+        if (!raced) throw err;
+        asset = raced;
+      }
+    }
+    this.rememberEnsuredSkillAsset(assetId);
+    return asset;
+  }
+
   /** LRU-ish 记录：达到上限时淘汰最早写入的条目。 */
   private rememberEnsuredSkillAsset(assetId: string): void {
     if (this.ensuredSkillAssets.has(assetId)) return;

@@ -27,6 +27,7 @@ export const SKILLS_DDL = `
 
     user_id         TEXT NOT NULL,
     owner_agent_id  TEXT NOT NULL,
+    owner_scope     TEXT NOT NULL DEFAULT 'agent',
     team_id         TEXT NOT NULL,
     task_id         TEXT NOT NULL DEFAULT '',
 
@@ -44,9 +45,6 @@ export const SKILLS_DDL = `
 
     UNIQUE(skill_id, version)
   );
-
-  CREATE UNIQUE INDEX IF NOT EXISTS uniq_skills_team_agent_name_head
-    ON skills(team_id, owner_agent_id, name) WHERE is_head=1 AND status='active';
 
   CREATE INDEX IF NOT EXISTS idx_skills_team_head
     ON skills(team_id, is_head, status);

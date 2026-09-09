@@ -102,6 +102,7 @@ interface SkillRowRaw {
 
   user_id: string;
   owner_agent_id: string;
+  owner_scope?: "agent" | "team";
   team_id: string;
   task_id: string;
 
@@ -133,6 +134,7 @@ function toSkill(raw: SkillRowRaw): Skill {
     is_head: raw.is_head === 1,
     user_id: raw.user_id,
     owner_agent_id: raw.owner_agent_id,
+    owner_scope: raw.owner_scope === "team" ? "team" : "agent",
     team_id: raw.team_id,
     task_id: raw.task_id,
     name: raw.name,
@@ -172,8 +174,21 @@ export class SqliteSkillStore implements ISkillStore {
   /** 创建表与索引。幂等。同时迁移旧索引与 FTS schema。 */
   init(): void {
     this.db.exec(SKILLS_DDL);
+    const skillColumns = new Set(
+      (this.db.prepare("PRAGMA table_info('skills')").all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    if (!skillColumns.has("owner_scope")) {
+      this.db.exec("ALTER TABLE skills ADD COLUMN owner_scope TEXT NOT NULL DEFAULT 'agent'");
+    }
     // 迁移：删除旧版 (team_id, name) 唯一索引（v2 重构后改为 team_id + owner_agent_id + name）
     this.db.exec("DROP INDEX IF EXISTS uniq_skills_team_name_head");
+    this.db.exec("DROP INDEX IF EXISTS uniq_skills_team_agent_name_head");
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_skills_team_agent_name_head
+      ON skills(team_id, owner_agent_id, name)
+      WHERE is_head=1 AND status='active' AND owner_scope='agent'`);
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_skills_team_name_head
+      ON skills(team_id, name)
+      WHERE is_head=1 AND status='active' AND owner_scope='team'`);
     this.db.exec(SKILL_FTS_DDL);
     // 迁移：检测 skill_fts 是否缺少 owner_agent_id 列（旧 schema 只有 5 列）
     this.migrateFtsSchema();
@@ -302,11 +317,14 @@ export class SqliteSkillStore implements ISkillStore {
     // [4] 同 team 同 agent 同 name 已 active head（且不是同一 skill_id 的更新） → 重名
     if (!head) {
       const oid = input.owner_agent_id ?? "default";
+      const ownerScope = input.owner_scope ?? "agent";
       const dupRaw = this.db
         .prepare(
-          "SELECT * FROM skills WHERE team_id=? AND owner_agent_id=? AND name=? AND is_head=1 AND status='active' LIMIT 1",
+          ownerScope === "team"
+            ? "SELECT * FROM skills WHERE team_id=? AND owner_scope='team' AND name=? AND is_head=1 AND status='active' LIMIT 1"
+            : "SELECT * FROM skills WHERE team_id=? AND owner_scope='agent' AND owner_agent_id=? AND name=? AND is_head=1 AND status='active' LIMIT 1",
         )
-        .get(tid, oid, input.name) as SkillRowRaw | undefined;
+        .get(...(ownerScope === "team" ? [tid, input.name] : [tid, oid, input.name])) as SkillRowRaw | undefined;
       if (dupRaw) {
         throw new SkillStoreError("SKILL_NAME_DUPLICATE", `name '${input.name}' already exists for agent in team`);
       }
@@ -319,6 +337,7 @@ export class SqliteSkillStore implements ISkillStore {
 
     const newVersion = head ? head.version + 1 : 1;
     const ownerForRow = head ? head.owner_agent_id : (input.owner_agent_id ?? "default");
+    const ownerScopeForRow = head ? head.owner_scope : (input.owner_scope ?? "agent");
     // user_id 记录的是本次操作者，而非首次创建者。后续版本取 input.user_id。
     const userIdForRow = input.user_id ?? "default";
     const ts = this.now();
@@ -339,10 +358,10 @@ export class SqliteSkillStore implements ISkillStore {
         .prepare(
           `INSERT INTO skills (
             row_id, skill_id, version, is_head,
-            user_id, owner_agent_id, team_id, task_id,
+            user_id, owner_agent_id, owner_scope, team_id, task_id,
             name, description, content, content_hash, manifest_json, storage_dir,
             status, metadata_json, created_at_ms, updated_at_ms
-          ) VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?,?,?,?)`,
+          ) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?)`,
         )
         .run(
           newRowId,
@@ -351,6 +370,7 @@ export class SqliteSkillStore implements ISkillStore {
           1,
           userIdForRow,
           ownerForRow,
+          ownerScopeForRow,
           tid,
           input.task_id ?? "default",
           input.name,

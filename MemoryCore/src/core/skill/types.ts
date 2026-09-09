@@ -225,6 +225,7 @@ export interface IdFields {
 
 /** skill 状态。与 interface.yaml 对齐：active 或 archived。 */
 export type SkillStatus = "active" | "archived";
+export type SkillOwnerScope = "agent" | "team";
 
 /** manifest_json 列里的单个资源元信息。字节不在此类型中。 */
 export interface SkillManifestEntry {
@@ -269,6 +270,7 @@ export interface Skill {
 
   user_id: string;
   owner_agent_id: string;
+  owner_scope: SkillOwnerScope;
   team_id: string;
   task_id: string;
 
@@ -305,6 +307,8 @@ export interface AppendVersionInput {
 
   /** 仅 create 时由调用方指定为 owner_agent_id；后续版本由 store 校验后从 head 继承。 */
   owner_agent_id?: string;
+  /** agent（默认）或真正的团队共享 Skill；team scope 不绑定 Agent。 */
+  owner_scope?: SkillOwnerScope;
 
   metadata_json?: string;
 }

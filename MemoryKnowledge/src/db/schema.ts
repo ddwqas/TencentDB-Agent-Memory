@@ -36,6 +36,7 @@ export const knowledgeCodeGraph = sqliteTable(
     statsJson: text("stats_json"),
     serviceUrl: text("service_url"),
     summary: text("summary"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
     version: integer("version").notNull().default(0),
     lastSyncAt: text("last_sync_at"),
     createdAt: text("created_at").notNull(),
@@ -45,7 +46,7 @@ export const knowledgeCodeGraph = sqliteTable(
   (table) => [
     uniqueIndex("idx_kcg_team_repo_branch")
       .on(table.serviceId, table.teamId, table.repoUrl, table.branch)
-      .where(sql`deleted_at IS NULL`),
+      .where(sql`deleted_at IS NULL AND metadata_json = '{}'`),
     index("idx_kcg_team_status").on(table.serviceId, table.teamId, table.status),
   ],
 );
@@ -73,6 +74,7 @@ export const knowledgeWiki = sqliteTable(
     pageCount: integer("page_count"),
     serviceUrl: text("service_url"),
     summary: text("summary"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
     version: integer("version").notNull().default(0),
     lastSyncAt: text("last_sync_at"),
     createdAt: text("created_at").notNull(),

@@ -742,6 +742,8 @@ export type SkillSummary = {
      * @type string | undefined
     */
     owner_user_id?: string;
+    /** Team-owned skills are shared without an Agent binding. */
+    owner_scope?: "agent" | "team";
     /**
      * @type string | undefined
     */

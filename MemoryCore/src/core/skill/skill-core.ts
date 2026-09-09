@@ -138,6 +138,7 @@ export interface CreateInput extends IdFields {
   content: string;
   resources?: SkillResourcePayload[];
   metadata?: Record<string, unknown>;
+  owner_scope?: "agent" | "team";
 }
 
 export interface UpdateInput extends IdFields {
@@ -292,7 +293,7 @@ export class SkillCore {
     try {
       return await this.versioning.createNewSkill(
         sid,
-        input.agent_id ?? "default",
+        input.owner_scope === "team" ? "" : (input.agent_id ?? "default"),
         { user_id: input.user_id, team_id: input.team_id, agent_id: input.agent_id, task_id: input.task_id },
         {
           content: input.content,
@@ -301,6 +302,7 @@ export class SkillCore {
           resourcesToWrite: input.resources,
           metadata_json: input.metadata ? JSON.stringify(input.metadata) : undefined,
         },
+        input.owner_scope ?? "agent",
       );
     } catch (e) {
       toCoreError(e);
