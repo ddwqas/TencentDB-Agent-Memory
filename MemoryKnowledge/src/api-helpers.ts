@@ -100,6 +100,9 @@ export interface WikiDetail {
   service_url: string | null;
   summary: string | null;
   status: string;
+  ingest_status: string;
+  active_version: number | null;
+  building_version: number | null;
   internal_status: string | null;
   sync_error: string | null;
   version: string;
@@ -118,6 +121,9 @@ export function toWikiDetail(row: WikiRow): WikiDetail {
     service_url: row.service_url ?? null,
     summary: row.summary ?? null,
     status: row.status,
+    ingest_status: row.ingest_status,
+    active_version: row.active_version,
+    building_version: row.building_version,
     internal_status: row.internal_status,
     sync_error: row.sync_error,
     version: toExternalVersion(row.version),

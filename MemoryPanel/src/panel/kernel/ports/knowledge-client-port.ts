@@ -1,5 +1,5 @@
 /**
- * Knowledge RPC 端口 — Wiki（15 端点）+ Code-Graph（13 端点）。
+ * Knowledge RPC 端口 — Wiki（含版本历史/回滚）+ Code-Graph。
  *
  * 对齐 docs/knowledge/knowledge-api.yaml（07/08/11 定稿）。管控对
  * wiki/code-graph 不持久化；UI 触发的操作通过该端口直连 core。
@@ -22,6 +22,9 @@ export interface WikiDetail {
   service_url: string | null;
   summary: string | null;
   status: 'draft' | 'pending' | 'processing' | 'ready' | 'failed';
+  ingest_status: 'idle' | 'pending' | 'processing' | 'failed';
+  active_version: number | null;
+  building_version: number | null;
   internal_status?: string | null;
   sync_error: string | null;
   version: string;
@@ -40,6 +43,25 @@ export interface WikiListResult {
 export interface WikiIngestResult {
   wiki_id: string;
   status: string;
+}
+
+export interface WikiVersionItem {
+  schema_version: 1;
+  version: number;
+  version_key: string;
+  state: 'building' | 'published' | 'failed';
+  active: boolean;
+  base_version: number | null;
+  base_version_key: string | null;
+  index_file: string | null;
+  page_count: number;
+  summary: string | null;
+  size_bytes: number;
+  created_at: string;
+  published_at: string | null;
+  failed_at: string | null;
+  error: string | null;
+  reason: 'ingest' | 'manual' | 'legacy-migration';
 }
 
 /** raw 素材文件项（来自 `raw/sources/` 文件系统 stat）。 */
@@ -181,6 +203,8 @@ export interface KnowledgeClientPort {
   wikiDelete(wikiIds: string[]): Promise<BatchDeleteResult>;
   wikiList(teamId: string, opts?: { status?: string; limit?: number; offset?: number }): Promise<WikiListResult>;
   wikiUpdateMeta(wikiId: string, patch: { name?: string; summary?: string | null }): Promise<WikiDetail>;
+  wikiVersionList(wikiId: string): Promise<{ items: WikiVersionItem[] }>;
+  wikiVersionRollback(wikiId: string, targetVersion: number, expectedActiveVersion: number): Promise<{ wiki: WikiDetail; version: WikiVersionItem }>;
 
   // Wiki — raw 文件层（ls/read 仅资产 id；write/rm 带 IdFields）
   wikiRawLs(wikiId: string): Promise<{ items: RawFileEntry[] }>;

@@ -11,6 +11,15 @@ import { tea, confirmThenRun } from '@/lib/tea-bridge';
 import { findExistingRawFilenames, formatOverwriteFilenames } from '../utils/wiki-upload-utils';
 import { type DetailTab, type SearchResult, type StatusFilter, type SubView, type ViewMode, type WikiScopeTab } from '../constants/wiki-constants';
 
+function isWikiBuilding(wiki: WikiDetail): boolean {
+  return (
+    wiki.ingest_status === 'pending' ||
+    wiki.ingest_status === 'processing' ||
+    wiki.status === 'pending' ||
+    wiki.status === 'processing'
+  );
+}
+
 export function useWikiSources() {
   const { t } = useTranslation();
   const [sources, setSources] = useState<WikiDetail[]>([]);
@@ -95,9 +104,7 @@ export function useWikiSources() {
     () => ({
       total: scopeSources.length,
       ready: scopeSources.filter((source) => source.status === 'ready').length,
-      processing: scopeSources.filter(
-        (source) => source.status === 'pending' || source.status === 'processing',
-      ).length,
+      processing: scopeSources.filter((source) => isWikiBuilding(source)).length,
       totalPages: scopeSources.reduce((sum, source) => sum + (source.page_count ?? 0), 0),
     }),
     [scopeSources],
@@ -106,7 +113,7 @@ export function useWikiSources() {
   const filteredSources = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
     return scopeSources.filter((source) => {
-      const isProcessing = source.status === 'pending' || source.status === 'processing';
+      const isProcessing = isWikiBuilding(source);
       if (statusFilter === 'ready' && source.status !== 'ready') return false;
       if (statusFilter === 'processing' && !isProcessing) return false;
       if (!normalizedKeyword) return true;
@@ -256,16 +263,14 @@ export function useWikiSources() {
   const runningWikiKey = useMemo(
     () =>
       sources
-        .filter((s) => s.status === 'pending' || s.status === 'processing')
-        .map((s) => `${s.wiki_id}:${s.status}:${s.internal_status ?? ''}`)
+        .filter(isWikiBuilding)
+        .map((s) => `${s.wiki_id}:${s.ingest_status}:${s.internal_status ?? ''}`)
         .join('|'),
     [sources],
   );
 
   useEffect(() => {
-    const running = sources.filter(
-      (s) => s.wiki_id && (s.status === 'pending' || s.status === 'processing'),
-    );
+    const running = sources.filter((s) => s.wiki_id && isWikiBuilding(s));
     if (running.length === 0) return;
     let cancelled = false;
     const poll = async () => {
@@ -285,7 +290,7 @@ export function useWikiSources() {
       );
       if (selectedWikiId && map.has(selectedWikiId)) {
         const d = map.get(selectedWikiId)!;
-        if (d.status === 'ready' || d.status === 'failed') void fetchDetail(selectedWikiId);
+        if (d.ingest_status === 'idle' || d.ingest_status === 'failed') void fetchDetail(selectedWikiId);
       }
     };
     void poll();
@@ -333,7 +338,7 @@ export function useWikiSources() {
   };
 
   const runningWiki = useMemo(
-    () => sources.find((s) => s.status === 'pending' || s.status === 'processing') ?? null,
+    () => sources.find(isWikiBuilding) ?? null,
     [sources],
   );
   /** 所有正在 ingest（pending / processing）的 wiki_id 集合，用于列表中逐卡片判断按钮状态。 */
@@ -341,7 +346,7 @@ export function useWikiSources() {
     () =>
       new Set(
         sources
-          .filter((s) => s.status === 'pending' || s.status === 'processing')
+          .filter(isWikiBuilding)
           .map((s) => s.wiki_id),
       ),
     [sources],
@@ -352,7 +357,7 @@ export function useWikiSources() {
     (ingestState.done > 0 && !!ingestState.detail);
   const displayIngestState = useMemo(() => {
     if (hasManualIngestState || !runningWiki) return ingestState;
-    const stage = wikiStageLabel(runningWiki.status, runningWiki.internal_status);
+    const stage = wikiStageLabel(runningWiki.ingest_status as WikiDetail['status'], runningWiki.internal_status);
     const pageHint =
       typeof runningWiki.page_count === 'number' ? t('wiki.ingest.currentPage', { count: runningWiki.page_count }) : '';
     return {
@@ -361,7 +366,7 @@ export function useWikiSources() {
       wiki: runningWiki.name,
       currentFile: '',
       detail: t('wiki.ingest.stateRecovery', { stage, pageHint }),
-      done: wikiProgressPercent(runningWiki.status, runningWiki.internal_status),
+      done: wikiProgressPercent(runningWiki.ingest_status as WikiDetail['status'], runningWiki.internal_status),
       total: 100,
       checkCount: 0,
       lastCheckedAt: '',

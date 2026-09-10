@@ -9,8 +9,8 @@
  * 图谱小，查询时从 graph_edge 临时构建内存 graphology 实例做多跳 BFS（复用现有算法）。
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "fs";
-import { join, basename, relative, resolve, isAbsolute } from "path";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, mkdirSync } from "fs";
+import { join, basename, relative, resolve, isAbsolute, sep } from "path";
 import Graph from "graphology";
 import type DatabaseType from "better-sqlite3";
 import pLimit, { type LimitFunction } from "p-limit";
@@ -37,13 +37,30 @@ import {
   deleteSources,
   classifySources,
   sha256,
+  listPageStorage,
+  listSources,
+  upsertSource,
   type SourceStatus,
 } from "./index-db.js";
+import {
+  activateWikiVersion,
+  beginWikiBuild,
+  bootstrapLegacyWiki,
+  failWikiBuild,
+  getActiveVersion,
+  listWikiVersions,
+  publishWikiBuild,
+  resolveStoredPage,
+  sourceStateDbPath,
+  updateWikiVersionSummary,
+  type WikiVersionItem,
+} from "./version-store.js";
 import { createLogger } from "../../logger.js";
 import { withSpan } from "../../telemetry.js";
 import { getIngestConcurrency } from "../../config.js";
 import { slugify } from "./ingest-v2/slug.js";
 import { DEFAULT_SCHEMA, DEFAULT_PURPOSE } from "./ingest-v2/template.js";
+import { rebuildIndexFile } from "./ingest-v2/index-builder.js";
 
 const log = createLogger("wiki-mgr");
 
@@ -150,6 +167,14 @@ export function createThrottledProgressFn(
 export interface IngestExecOptions {
   onProgress?: ProgressFn;
   globalLlmLimit?: LimitFunction;
+  /** Monotonic build number allocated by WikiService. */
+  version?: number;
+}
+
+export interface WikiMutationResult<T> {
+  value: T;
+  version: number;
+  pageCount: number;
 }
 
 export interface WikiSourceManager {
@@ -166,6 +191,11 @@ export interface WikiSourceManager {
   /** Register an imported on-disk snapshot without rebuilding its index. */
   restore(config: WikiSourceConfig): WikiSourceState;
   ingest(name: string, llmConfig: any, opts?: IngestExecOptions): Promise<any[]>;
+  publishMutation<T>(name: string, version: number, mutate: (candidateRoot: string) => T): WikiMutationResult<T>;
+  publishMutationAsync<T>(name: string, version: number, mutate: (candidateRoot: string) => Promise<T>): Promise<WikiMutationResult<T>>;
+  versions(name: string): WikiVersionItem[];
+  activate(name: string, version: number, expectedActiveVersion?: number): WikiSourceState;
+  setVersionSummary(name: string, version: number, summary: string | null): void;
 }
 
 /** 图谱中不参与建边/展示的页类型（如内部 query 页）。 */
@@ -193,6 +223,8 @@ interface PageMeta {
   type: string;
   relPath: string;
   snippet: string;
+  storageKey?: string;
+  storageRelPath?: string;
 }
 
 /**
@@ -400,14 +432,23 @@ function writeIndex(db: DatabaseType.Database, pages: WikiPage[]): void {
 
   const insFts = db.prepare("INSERT INTO wiki_fts(page_id, title_tok, content_tok) VALUES (?,?,?)");
   const insMeta = db.prepare(
-    "INSERT INTO page_meta(page_id, title, type, rel_path, snippet) VALUES (?,?,?,?,?)",
+    `INSERT INTO page_meta(page_id, title, type, rel_path, snippet, storage_key, storage_rel_path)
+     VALUES (?,?,?,?,?,?,?)`,
   );
   const insEdge = db.prepare("INSERT OR IGNORE INTO graph_edge(source_id, target_id) VALUES (?,?)");
 
   for (const p of pages) {
     // wiki_fts + page_meta 收录所有页（含 hidden 类型，供检索）。
     insFts.run(p.id, tokenize(p.title).join(" "), tokenize(p.content).join(" "));
-    insMeta.run(p.id, p.title, p.type, p.relPath, makeSnippet(p));
+    insMeta.run(
+      p.id,
+      p.title,
+      p.type,
+      p.relPath,
+      makeSnippet(p),
+      p.storageKey ?? null,
+      p.storageRelPath ?? p.relPath,
+    );
   }
   // graph_edge 只在 visible 页间。
   for (const e of resolveEdges(pages)) insEdge.run(e.source, e.target);
@@ -852,12 +893,143 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     } catch { /* fresh start */ }
   }
 
+  /** Scan one physical build layer. */
   function scanWikiDir(projectPath: string): WikiPage[] {
     const wikiDir = join(projectPath, "wiki");
     if (!existsSync(wikiDir)) throw new Error(`wiki/ not found: ${wikiDir}`);
     const pages: WikiPage[] = [];
     scanRecursive(wikiDir, wikiDir, pages);
     return pages;
+  }
+
+  function pageFromStoredRow(
+    projectPath: string,
+    row: ReturnType<typeof listPageStorage>[number],
+    fallbackKey: string,
+  ): WikiPage | null {
+    const storageKey = row.storage_key || fallbackKey;
+    const storageRelPath = row.storage_rel_path || row.rel_path || `wiki/${row.page_id}.md`;
+    const full = resolveStoredPage(projectPath, storageKey, storageRelPath);
+    if (!full) return null;
+    try {
+      const content = readFileSync(full, "utf-8");
+      const fm = extractFrontmatter(content);
+      return {
+        id: row.page_id,
+        title: row.title || fm.title || basename(full, ".md").replace(/-/g, " "),
+        type: row.type || fm.type,
+        path: full,
+        relPath: row.rel_path || `wiki/${row.page_id}.md`,
+        content,
+        sources: fm.sources,
+        links: extractWikilinks(content),
+        description: fm.description,
+        storageKey,
+        storageRelPath,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Read the complete logical page set described by the active index. */
+  function scanActivePages(name: string, projectPath: string): WikiPage[] {
+    const active = getActiveVersion(projectPath);
+    if (!active) return [];
+    const indexPath = join(projectPath, active.index_file);
+    const db = getReadDb(name, projectPath, indexPath);
+    return listPageStorage(db)
+      .map((row) => pageFromStoredRow(projectPath, row, active.version_key))
+      .filter((page): page is WikiPage => page !== null);
+  }
+
+  function decorateStorageRefs(
+    name: string,
+    projectPath: string,
+    candidateKey: string,
+    pages: WikiPage[],
+  ): void {
+    const active = getActiveVersion(projectPath);
+    let oldById = new Map<string, ReturnType<typeof listPageStorage>[number]>();
+    if (active) {
+      try {
+        const db = getReadDb(name, projectPath, join(projectPath, active.index_file));
+        oldById = new Map(listPageStorage(db).map((row) => [row.page_id, row]));
+      } catch {
+        oldById = new Map();
+      }
+    }
+    for (const page of pages) {
+      page.storageKey = candidateKey;
+      page.storageRelPath = page.relPath;
+      // index.md is a per-generation catalog and must live in the new layer.
+      if (page.id === "index") continue;
+      const old = oldById.get(page.id);
+      if (!active || !old) continue;
+      const oldKey = old.storage_key || active.version_key;
+      const oldRel = old.storage_rel_path || old.rel_path || page.relPath;
+      const oldPath = resolveStoredPage(projectPath, oldKey, oldRel);
+      if (!oldPath) continue;
+      try {
+        if (readFileSync(oldPath, "utf-8") === page.content) {
+          page.storageKey = oldKey;
+          page.storageRelPath = oldRel;
+        }
+      } catch {
+        // Missing historical content makes this page a new physical revision.
+      }
+    }
+  }
+
+  function materializeActivePages(name: string, projectPath: string, candidatePath: string): void {
+    if (!getActiveVersion(projectPath)) return;
+    for (const page of scanActivePages(name, projectPath)) {
+      if (!page.relPath.startsWith("wiki/") || page.relPath.includes("..")) continue;
+      const target = resolve(candidatePath, page.relPath);
+      const base = resolve(candidatePath) + sep;
+      if (!target.startsWith(base)) continue;
+      mkdirSync(join(target, ".."), { recursive: true });
+      writeFileSync(target, page.content, "utf-8");
+    }
+  }
+
+  function ensureSourceState(projectPath: string): string {
+    const path = sourceStateDbPath(projectPath);
+    const wasMissing = !existsSync(path);
+    initIndexDb(projectPath, path);
+    if (wasMissing) {
+      const active = getActiveVersion(projectPath);
+      if (active) {
+        const bootstrapPoolKey = `source-bootstrap:${projectPath}`;
+        try {
+          const rows = listSources(getReadDb(bootstrapPoolKey, projectPath, join(projectPath, active.index_file)));
+          withWriteDb(projectPath, (db) => {
+            for (const row of rows) {
+              upsertSource(db, {
+                filename: row.filename,
+                sha256: row.sha256,
+                size: row.size,
+                userId: row.last_modified_by,
+              });
+              if (row.status !== "uploaded") {
+                recordSourceIngestResult(db, {
+                  filename: row.filename,
+                  sha256: row.sha256,
+                  size: row.size,
+                  ok: row.status === "ingested",
+                  error: row.ingest_error,
+                });
+              }
+            }
+          }, path);
+        } catch {
+          // A legacy index without a source table simply starts with an empty registry.
+        } finally {
+          evictWikiDb(bootstrapPoolKey);
+        }
+      }
+    }
+    return path;
   }
 
   function scanRecursive(baseDir: string, dir: string, pages: WikiPage[]) {
@@ -877,22 +1049,15 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     }
   }
 
-  /** 重建 wiki 的 index.db 索引（幂等建库 → 事务重建三表 → 驱逐读连接防 stale）。 */
-  function rebuildIndex(name: string, pages: WikiPage[]) {
-    const state = sources.get(name);
-    if (!state) throw new Error(`rebuildIndex: unknown wiki ${name}`);
-    initIndexDb(state.path); // 幂等：首次注册即建库+4表；已存在则无操作
-    withWriteDb(state.path, (db) => writeIndex(db, pages));
-    evictWikiDb(name); // 丢弃可能持有旧快照的读连接，下次查询重开
-  }
-
   function searchInternal(name: string, query: string, limit: number, options: SearchOptions): SearchResponse {
     const state = sources.get(name);
     if (!state) return { results: [], links: [], count: 0 };
 
     let db: DatabaseType.Database;
     try {
-      db = getReadDb(name, state.path);
+      const active = getActiveVersion(state.path);
+      if (!active) return { results: [], links: [], count: 0 };
+      db = getReadDb(name, state.path, join(state.path, active.index_file));
     } catch {
       // 库不存在（wiki 未 ingest/未建索引）→ 返回空，与旧"无引擎"行为一致。
       return { results: [], links: [], count: 0 };
@@ -948,27 +1113,20 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
   // Persist once after startup so legacy absolute paths are migrated when
   // their project directory is available at the new location.
   if (sources.size > 0) persist();
-  // 启动时挂载现有索引。index.db 是 Wiki 快照的一部分；启动恢复不得重建或改写它。
-  // 查询侧会从 index.db 按需构造内存读模型，正文页只需扫描以恢复 pageCount。
+  // 启动时仅挂载活动版本。旧 wiki/index.db 会先复制为一个发布版本，旧文件保留。
   log.info("Restoring wiki indexes", { count: sources.size });
   let restored = 0;
   let failed = 0;
   for (const [name, state] of sources.entries()) {
-    if (state.status !== "ready") {
-      log.debug("Skip non-ready wiki source", { name, status: state.status });
-      continue;
-    }
-    const indexPath = join(state.path, "index.db");
-    if (!existsSync(indexPath)) {
-      log.warn("Wiki index missing on disk; mark error and skip restore", { name, path: state.path });
-      state.status = "error";
-      state.error = `index.db not found: ${indexPath}`;
-      failed++;
-      continue;
-    }
     try {
-      const pages = scanWikiDir(state.path);
+      const active = bootstrapLegacyWiki(state.path);
+      if (!active) continue;
+      ensureSourceState(state.path);
+      const pages = scanActivePages(name, state.path);
+      state.status = "ready";
       state.pageCount = pages.length;
+      state.activeVersion = active.version;
+      state.activeVersionKey = active.version_key;
       state.error = undefined;
       restored++;
       log.info("Mounted wiki index", { name, pageCount: pages.length });
@@ -987,9 +1145,18 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     const state: WikiSourceState = { name: config.name, path: config.path, status: "scanning" };
     sources.set(config.name, state);
     try {
-      const pages = scanWikiDir(config.path);
-      rebuildIndex(config.name, pages);
-      state.status = "ready"; state.pageCount = pages.length; state.lastSyncAt = new Date().toISOString();
+      const active = bootstrapLegacyWiki(config.path);
+      ensureSourceState(config.path);
+      if (active) {
+        const pages = scanActivePages(config.name, config.path);
+        state.status = "ready";
+        state.pageCount = pages.length;
+        state.activeVersion = active.version;
+        state.activeVersionKey = active.version_key;
+        state.lastSyncAt = new Date().toISOString();
+      } else {
+        state.pageCount = 0;
+      }
     } catch (err) { state.status = "error"; state.error = String(err); }
     persist();
     return state;
@@ -998,115 +1165,302 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
   function sync(name: string): WikiSourceState {
     const state = sources.get(name);
     if (!state) throw new Error(`Not found: ${name}`);
-    state.status = "scanning";
-    const t0 = Date.now();
     try {
-      const pages = scanWikiDir(state.path);
-      rebuildIndex(name, pages);
-      state.status = "ready"; state.pageCount = pages.length; state.lastSyncAt = new Date().toISOString(); state.error = undefined;
-      log.info("sync 完成（索引已重建）", { name, pageCount: pages.length, ms: Date.now() - t0 });
+      const active = getActiveVersion(state.path);
+      const pages = active ? scanActivePages(name, state.path) : [];
+      state.status = active ? "ready" : "scanning";
+      state.pageCount = pages.length;
+      state.activeVersion = active?.version;
+      state.activeVersionKey = active?.version_key;
+      state.lastSyncAt = new Date().toISOString();
+      state.error = undefined;
     } catch (err) {
       state.status = "error"; state.error = String(err);
-      log.error("sync 失败", { name, path: state.path, error: String(err) });
     }
     persist();
     return state;
   }
 
   function init(config: WikiSourceConfig): WikiSourceState {
-    initWikiProject(config.path);
+    mkdirSync(join(config.path, "raw", "sources"), { recursive: true });
     return register(config);
   }
 
   function restore(config: WikiSourceConfig): WikiSourceState {
     const existing = sources.get(config.name);
-    if (existing) return existing;
-    if (!existsSync(join(config.path, "index.db"))) {
-      throw new Error(`index.db missing: ${config.path}`);
-    }
-    const pages = scanWikiDir(config.path);
-    const state: WikiSourceState = {
-      name: config.name,
-      path: config.path,
-      status: "ready",
-      pageCount: pages.length,
-      lastSyncAt: new Date().toISOString(),
-    };
+    const active = bootstrapLegacyWiki(config.path);
+    if (!active) throw new Error(`active Wiki version missing: ${config.path}`);
+    ensureSourceState(config.path);
+    const state: WikiSourceState = existing ?? { name: config.name, path: config.path, status: "ready" };
+    state.path = config.path;
+    state.status = "ready";
+    state.pageCount = 0;
+    state.activeVersion = active.version;
+    state.activeVersionKey = active.version_key;
+    state.error = undefined;
     sources.set(config.name, state);
+    const pages = scanActivePages(config.name, config.path);
+    state.pageCount = pages.length;
+    state.lastSyncAt = new Date().toISOString();
     persist();
     return state;
+  }
+
+  function updateSourceStateAfterBuild(
+    name: string,
+    projectPath: string,
+    outcome: IngestOutcome,
+  ): void {
+    try {
+      const sourceIndex = ensureSourceState(projectPath);
+      withWriteDb(projectPath, (db) => {
+        for (const processed of outcome.processed) {
+          const current = db.prepare("SELECT sha256 FROM source WHERE filename = ?").get(processed.filename) as
+            | { sha256: string }
+            | undefined;
+          // A newer upload must remain uploaded for the next batch.
+          if (current && current.sha256 !== processed.sha256) continue;
+          recordSourceIngestResult(db, processed);
+        }
+        for (const filename of outcome.deletedSources) {
+          if (!existsSync(join(projectPath, "raw", "sources", filename))) deleteSources(db, [filename]);
+        }
+      }, sourceIndex);
+      evictWikiDb(name);
+    } catch (err) {
+      // Publication is authoritative. A stale source registry only causes a safe re-extract.
+      log.warn("Failed to update source registry after Wiki build", { name, error: String(err) });
+    }
+  }
+
+  function seedCandidateSources(
+    name: string,
+    projectPath: string,
+    candidatePath: string,
+    candidateDb: DatabaseType.Database,
+  ): void {
+    try {
+      const sourceIndex = ensureSourceState(projectPath);
+      const rows = listSources(getReadDb(name, projectPath, sourceIndex));
+      for (const row of rows) {
+        upsertSource(candidateDb, {
+          filename: row.filename,
+          sha256: row.sha256,
+          size: row.size,
+          userId: row.last_modified_by,
+        });
+        if (row.status !== "uploaded") {
+          recordSourceIngestResult(candidateDb, {
+            filename: row.filename,
+            sha256: row.sha256,
+            size: row.size,
+            ok: row.status === "ingested",
+            error: row.ingest_error,
+          });
+        }
+      }
+    } catch (err) {
+      log.warn("Failed to seed candidate source metadata", { candidatePath, error: String(err) });
+    }
+  }
+
+  function completeCandidate(
+    name: string,
+    state: WikiSourceState,
+    build: ReturnType<typeof beginWikiBuild>,
+    outcome?: IngestOutcome,
+  ): number {
+    rebuildIndexFile(build.versionDir);
+    const pages = scanWikiDir(build.versionDir);
+    decorateStorageRefs(name, state.path, build.versionKey, pages);
+    initIndexDb(build.versionDir);
+    withWriteDb(build.versionDir, (db) => {
+      writeIndex(db, pages);
+      seedCandidateSources(name, state.path, build.versionDir, db);
+      if (outcome) {
+        for (const processed of outcome.processed) {
+          const current = db.prepare("SELECT sha256 FROM source WHERE filename = ?").get(processed.filename) as
+            | { sha256: string }
+            | undefined;
+          if (current && current.sha256 !== processed.sha256) continue;
+          recordSourceIngestResult(db, processed);
+        }
+        for (const filename of outcome.deletedSources) {
+          if (!existsSync(join(state.path, "raw", "sources", filename))) deleteSources(db, [filename]);
+        }
+      }
+    });
+    // The candidate needed a full materialized view for merge/cascade/indexing.
+    // Its immutable published layer keeps only new/changed pages; unchanged rows
+    // already reference their older storage layer in page_meta.
+    for (const page of pages) {
+      if (page.storageKey !== build.versionKey) rmSync(page.path, { force: true });
+    }
+    const published = publishWikiBuild(build, join(build.versionDir, "index.db"), pages.length);
+    evictWikiDb(name);
+    state.status = "ready";
+    state.pageCount = pages.length;
+    state.activeVersion = published.version;
+    state.activeVersionKey = published.version_key;
+    state.lastSyncAt = new Date().toISOString();
+    state.error = undefined;
+    try { persist(); } catch (err) {
+      log.warn("Wiki published but manager state persistence failed", { name, error: String(err) });
+    }
+    return pages.length;
   }
 
   async function ingest(name: string, llmConfig: any, opts?: IngestExecOptions): Promise<any[]> {
     const state = sources.get(name);
     if (!state) throw new Error(`Not found: ${name}`);
     const projectPath = state.path;
-    initIndexDb(projectPath); // 确保 index.db 存在（register 通常已建，幂等）
+    const versions = listWikiVersions(projectPath);
+    const version = opts?.version ?? Math.max(0, ...versions.map((item) => item.version)) + 1;
+    const build = beginWikiBuild(projectPath, version, "ingest");
+    materializeActivePages(name, projectPath, build.versionDir);
+    initWikiProject(build.versionDir);
 
     // 读上次 source 状态（增量判断基线）——须在抽取前读取。
     let oldStates = new Map<string, { sha256: string; status: SourceStatus }>();
     try {
-      oldStates = readSourceStates(getReadDb(name, projectPath));
+      const sourceIndex = ensureSourceState(projectPath);
+      oldStates = readSourceStates(getReadDb(name, projectPath, sourceIndex));
     } catch {
       /* 库刚建 / 无 source 行 → 全部视为新增 */
     }
-
-    const outcome = await withSpan("wiki-ingest", async (span) => {
-      span.setAttribute("wiki.name", name);
-      return runIngestIncremental(
-        projectPath,
-        oldStates,
-        llmConfig,
-        opts?.onProgress,
-        opts?.globalLlmLimit,
-      );
-    });
-
-    // 重建索引 + 登记 source 状态 + 删已删源行：**同一写事务**（设计 003 §3.6 step 6，强一致）。
-    state.status = "scanning";
     const t0 = Date.now();
     try {
-      const pages = scanWikiDir(projectPath);
-      withWriteDb(projectPath, (db) => {
-        writeIndex(db, pages);
-        for (const p of outcome.processed) recordSourceIngestResult(db, p);
-        if (outcome.deletedSources.length > 0) deleteSources(db, outcome.deletedSources);
+      const outcome = await withSpan("wiki-ingest", async (span) => {
+        span.setAttribute("wiki.name", name);
+        span.setAttribute("wiki.version", version);
+        return runIngestIncremental(
+          build.versionDir,
+          oldStates,
+          llmConfig,
+          opts?.onProgress,
+          opts?.globalLlmLimit,
+        );
       });
-      evictWikiDb(name); // 丢弃可能持旧快照的读连接
-
       const attempted = outcome.processed.length;
-      const failed = outcome.processed.filter((p) => !p.ok);
-      if (attempted > 0 && failed.length === attempted) {
-        const first = failed[0];
+      const failedSources = outcome.processed.filter((p) => !p.ok);
+      if (attempted > 0 && failedSources.length === attempted) {
+        updateSourceStateAfterBuild(name, projectPath, outcome);
+        const first = failedSources[0];
         throw new Error(
           `all source documents failed to ingest${first ? `; first failure: ${first.filename}: ${first.error ?? "unknown"}` : ""}`,
         );
       }
-
-      state.status = "ready";
-      state.pageCount = pages.length;
-      state.lastSyncAt = new Date().toISOString();
-      state.error = undefined;
-      log.info("ingest 完成（增量抽取 + 索引/源状态同事务重建）", {
+      const pageCount = completeCandidate(name, state, build, outcome);
+      updateSourceStateAfterBuild(name, projectPath, outcome);
+      log.info("ingest 完成（隔离构建 + 原子发布）", {
         name,
-        pageCount: pages.length,
+        version,
+        pageCount,
         extracted: outcome.processed.length,
-        failed: failed.length,
+        failed: failedSources.length,
         ms: Date.now() - t0,
       });
+      return outcome.results;
     } catch (err) {
-      state.status = "error";
-      state.error = String(err);
+      failWikiBuild(build, err);
+      // A refresh failure never invalidates an already-published generation.
+      if (!getActiveVersion(projectPath)) {
+        state.status = "error";
+        state.error = String(err);
+      }
       log.error("ingest 失败", { name, path: projectPath, error: String(err) });
       persist();
       throw err;
     }
+  }
+
+  function publishMutation<T>(
+    name: string,
+    version: number,
+    mutate: (candidateRoot: string) => T,
+  ): WikiMutationResult<T> {
+    const state = sources.get(name);
+    if (!state) throw new Error(`Not found: ${name}`);
+    const build = beginWikiBuild(state.path, version, "manual");
+    try {
+      materializeActivePages(name, state.path, build.versionDir);
+      initWikiProject(build.versionDir);
+      const value = mutate(build.versionDir);
+      const pageCount = completeCandidate(name, state, build);
+      return { value, version, pageCount };
+    } catch (err) {
+      failWikiBuild(build, err);
+      throw err;
+    }
+  }
+
+  async function publishMutationAsync<T>(
+    name: string,
+    version: number,
+    mutate: (candidateRoot: string) => Promise<T>,
+  ): Promise<WikiMutationResult<T>> {
+    const state = sources.get(name);
+    if (!state) throw new Error(`Not found: ${name}`);
+    const build = beginWikiBuild(state.path, version, "manual");
+    try {
+      materializeActivePages(name, state.path, build.versionDir);
+      initWikiProject(build.versionDir);
+      const value = await mutate(build.versionDir);
+      const pageCount = completeCandidate(name, state, build);
+      return { value, version, pageCount };
+    } catch (err) {
+      failWikiBuild(build, err);
+      throw err;
+    }
+  }
+
+  function activate(name: string, version: number, expectedActiveVersion?: number): WikiSourceState {
+    const state = sources.get(name);
+    if (!state) throw new Error(`Not found: ${name}`);
+    const target = listWikiVersions(state.path).find(
+      (item) => item.version === version && item.state === "published" && item.index_file,
+    );
+    if (!target?.index_file) throw new Error(`published version not found: ${version}`);
+    const validationDb = getReadDb(name, state.path, join(state.path, target.index_file));
+    const quickCheck = validationDb.pragma("quick_check", { simple: true });
+    if (quickCheck !== "ok") throw new Error(`version ${version} index validation failed`);
+    const pageRows = listPageStorage(validationDb);
+    if (pageRows.length !== target.page_count) {
+      throw new Error(`version ${version} page count mismatch`);
+    }
+    for (const row of pageRows) {
+      const path = resolveStoredPage(
+        state.path,
+        row.storage_key || target.version_key,
+        row.storage_rel_path || row.rel_path || `wiki/${row.page_id}.md`,
+      );
+      if (!path || !existsSync(path)) throw new Error(`version ${version} page missing: ${row.page_id}`);
+    }
+    const activated = activateWikiVersion(state.path, version, expectedActiveVersion);
+    evictWikiDb(name);
+    state.status = "ready";
+    state.activeVersion = activated.version;
+    state.activeVersionKey = activated.version_key;
+    state.pageCount = activated.page_count;
+    state.lastSyncAt = new Date().toISOString();
+    state.error = undefined;
     persist();
-    return outcome.results;
+    return state;
   }
 
   return {
-    register, sync, init, restore, ingest,
+    register, sync, init, restore, ingest, publishMutation, publishMutationAsync, activate,
+    setVersionSummary: (name, version, summary) => {
+      const state = sources.get(name);
+      if (state) {
+        try { updateWikiVersionSummary(state.path, version, summary); }
+        catch (err) { log.warn("Failed to persist Wiki version summary", { name, version, error: String(err) }); }
+      }
+    },
+    versions: (name) => {
+      const state = sources.get(name);
+      return state ? listWikiVersions(state.path) : [];
+    },
     get: (name) => sources.get(name),
     list: () => [...sources.values()],
     remove: (name) => {
@@ -1122,7 +1476,9 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
       const state = sources.get(name);
       if (!state) return { nodes: [], edges: [], communities: [] };
       try {
-        const db = getReadDb(name, state.path);
+        const active = getActiveVersion(state.path);
+        if (!active) return { nodes: [], edges: [], communities: [] };
+        const db = getReadDb(name, state.path, join(state.path, active.index_file));
         return loadReadModel(db).pg.view;
       } catch {
         return { nodes: [], edges: [], communities: [] };
@@ -1143,25 +1499,24 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
         return null;
       }
 
-      // 支持多种格式：
-      //   "wiki/concepts/l0-录入.md" → 完整 relPath
-      //   "concepts/l0-录入.md"      → 去掉 wiki/ 前缀
-      //   "concepts/l0-录入"         → id 格式（不带 .md）
       const cleanPath = relPath.replace(/^wiki\//, "");
-      const base = join(state.path, "wiki");
-      let fullPath = join(base, cleanPath);
-      if (!fullPath.startsWith(base)) return null;
-      // 先直接尝试，再补 .md
-      try { return readFileSync(fullPath, "utf-8"); } catch {}
-      if (!cleanPath.endsWith(".md")) {
-        try { return readFileSync(fullPath + ".md", "utf-8"); } catch {}
-      }
+      if (!cleanPath || cleanPath.includes("..") || cleanPath.startsWith("/")) return null;
+      const active = getActiveVersion(state.path);
+      if (!active) return null;
+      try {
+        const db = getReadDb(name, state.path, join(state.path, active.index_file));
+        const id = cleanPath.replace(/\.md$/, "");
+        const wantedRel = `wiki/${cleanPath.endsWith(".md") ? cleanPath : `${cleanPath}.md`}`;
+        const row = listPageStorage(db).find((item) => item.page_id === id || item.rel_path === wantedRel);
+        if (!row) return null;
+        return pageFromStoredRow(state.path, row, active.version_key)?.content ?? null;
+      } catch {}
       return null;
     },
     getPages: (name) => {
       const state = sources.get(name);
       if (!state) return [];
-      try { return scanWikiDir(state.path); } catch { return []; }
+      try { return scanActivePages(name, state.path); } catch { return []; }
     },
   };
 }

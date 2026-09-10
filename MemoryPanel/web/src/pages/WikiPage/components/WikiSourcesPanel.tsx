@@ -203,7 +203,7 @@ export default function WikiSourcesPanel() {
                     <ChevronRightIcon size={14} className="_asset-wiki-card-chevron" />
                   </div>
                   <div className="_asset-wiki-card-meta">
-                    <WikiStatusBadge status={source.status} />
+                    <WikiStatusBadge status={source.status} ingestStatus={source.ingest_status} />
                     <span>
                       {t('wiki.card.pagesAndTime', { pages: source.page_count ?? 0, time: formatShortTime(source.last_sync_at) })}
                     </span>
@@ -259,7 +259,7 @@ export default function WikiSourcesPanel() {
                   key: 'status',
                   header: t('wiki.table.status'),
                   width: 100,
-                  render: (source) => <WikiStatusBadge status={source.status} />,
+                  render: (source) => <WikiStatusBadge status={source.status} ingestStatus={source.ingest_status} />,
                 },
                 {
                   key: 'page_count',

@@ -24,6 +24,7 @@ export type SyncStatus = "pending" | "processing" | "ready" | "failed";
  * code-graph 不使用 draft（其 create 即入队建图，初始 pending 是真 in-flight）。
  */
 export type WikiStatus = SyncStatus | "draft";
+export type WikiIngestStatus = "idle" | "pending" | "processing" | "failed";
 
 // ───────────────────────── Code-Graph ─────────────────────────
 
@@ -108,6 +109,9 @@ export interface WikiRow {
   task_id: string | null;
   visibility: string;
   status: WikiStatus;
+  ingest_status: WikiIngestStatus;
+  active_version: number | null;
+  building_version: number | null;
   internal_status: string | null;
   sync_error: string | null;
   page_count: number | null;
@@ -144,6 +148,9 @@ export interface ImportWikiInput extends CreateWikiInput {
 
 export interface WikiStatusPatch {
   status?: WikiStatus;
+  ingest_status?: WikiIngestStatus;
+  active_version?: number | null;
+  building_version?: number | null;
   internal_status?: string | null;
   sync_error?: string | null;
   page_count?: number | null;
@@ -160,7 +167,7 @@ export interface WikiMetaPatch {
 
 // ───────────────────────── Audit ─────────────────────────
 
-export type AuditAction = "ingest" | "ready" | "failed" | "delete" | "create";
+export type AuditAction = "ingest" | "ready" | "failed" | "delete" | "create" | "rollback" | "page_write" | "page_delete" | "raw_delete";
 
 export interface AuditLogInput {
   service_id?: string | null;
@@ -213,6 +220,9 @@ export interface SyncedWikiRef {
   wiki_id: string;
   service_id: string;
   team_id: string;
+  active_version: number | null;
+  ingest_status: WikiIngestStatus;
+  summary: string | null;
 }
 
 // ───────────────────────── Store interface ─────────────────────────
@@ -258,5 +268,6 @@ export interface IKnowledgeStore {
   markInterruptedAsFailed(reason?: string): number;
   /** All ready code-graphs (with service_id) so module.ts can rebuild per-tenant dirs. */
   listSyncedCodeGraphs(): SyncedCodeGraphRef[];
+  /** All non-draft Wikis; restart reconciliation validates the on-disk active pointer. */
   listSyncedWikis(): SyncedWikiRef[];
 }

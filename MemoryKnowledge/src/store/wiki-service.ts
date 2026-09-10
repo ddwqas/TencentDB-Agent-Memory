@@ -8,8 +8,7 @@
  *
  * 文件层（11 文档定稿）：raw / page 各一套 ls/read/write/rm，对齐 L2 Scenario。
  * - raw/* 仅操作 raw/sources/，不触发 ingest。
- * - page/* 操作 wiki/，写入自动注入 frontmatter `locked: true`，删除调
- *   lib 层 cascadeDeleteWikiPagesWithRefs 做引用级联。
+ * - page/* 读取活动版本；写入/删除发布新的 Copy-on-Write 版本。
  */
 
 import { join, resolve, normalize, sep } from "node:path";
@@ -18,8 +17,6 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
-  readdirSync,
-  statSync,
   existsSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -43,6 +40,12 @@ import {
   sha256,
   type SourceStatus,
 } from "../engines/wiki/index-db.js";
+import { createWikiSourceManager, type WikiSourceManager } from "../engines/wiki/index.js";
+import {
+  appendSourceHistory,
+  sourceStateDbPath,
+  type WikiVersionItem,
+} from "../engines/wiki/version-store.js";
 
 export interface WikiBuildContext {
   wikiId: string;
@@ -53,6 +56,8 @@ export interface WikiBuildContext {
   setInternalStatus: (s: string) => void;
   /** 单次 ingest 代际；进度/终态 callback 共用，防 Panel 迟到包 */
   ingestRunId: string;
+  /** Monotonic generation allocated before the worker is queued. */
+  version: number;
 }
 
 export interface WikiBuildResult {
@@ -72,6 +77,13 @@ export type IngestResult =
   | { kind: "not_found" }
   | { kind: "busy"; status: "pending" | "processing"; step: string | null };
 
+export type RollbackResult =
+  | { kind: "ok"; row: WikiRow; version: WikiVersionItem }
+  | { kind: "not_found" }
+  | { kind: "busy" }
+  | { kind: "conflict"; active_version: number | null }
+  | { kind: "invalid_version"; message: string };
+
 export interface WikiServiceLogger {
   info?: (msg: string) => void;
   warn?: (msg: string) => void;
@@ -84,6 +96,7 @@ export interface WikiServiceOptions {
   worker: WikiWorker;
   queue?: BuildQueue;
   logger?: WikiServiceLogger;
+  wikiManager?: WikiSourceManager;
   /** Callback config for TMC status notifications. Optional. */
   callbackConfig?: {
     tmcCallbackUrl: string;
@@ -210,6 +223,7 @@ export class WikiService {
   private readonly worker: WikiWorker;
   private readonly queue: BuildQueue;
   private readonly logger?: WikiServiceLogger;
+  private readonly wikiManager: WikiSourceManager;
   private readonly callbackConfig?: {
     tmcCallbackUrl: string;
     resolveLlm: (serviceId: string) => import("../config.js").LlmConfig;
@@ -227,6 +241,7 @@ export class WikiService {
     this.worker = opts.worker;
     this.queue = opts.queue ?? new BuildQueue();
     this.logger = opts.logger;
+    this.wikiManager = opts.wikiManager ?? createWikiSourceManager(join(this.dataRoot, "_wiki_engines"));
     this.callbackConfig = opts.callbackConfig;
   }
 
@@ -243,9 +258,9 @@ export class WikiService {
     if (!existed) {
       const dir = this.dirFor(row.service_id, row.team_id, row.wiki_id);
       mkdirSync(join(dir, "raw", "sources"), { recursive: true });
-      // 显式建 index.db（4 表，含 source）——此后 rawWrite/rawLs 直接读写 source 表（设计 006/003）。
+      // Source 状态与发布索引分离；发布索引从此只读且按版本保留。
       try {
-        initIndexDb(dir);
+        initIndexDb(dir, sourceStateDbPath(dir));
       } catch (err) {
         this.logger?.warn?.(`[wiki] initIndexDb failed for ${row.wiki_id}: ${String(err)}`);
       }
@@ -273,12 +288,14 @@ export class WikiService {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return { kind: "not_found" };
     // 并发拒绝：正在排队/执行中直接拒绝，不覆盖状态、不重复入队、不写 audit。
-    if (row.status === "pending" || row.status === "processing") {
-      return { kind: "busy", status: row.status, step: row.internal_status };
+    if (row.ingest_status === "pending" || row.ingest_status === "processing") {
+      return { kind: "busy", status: row.ingest_status, step: row.internal_status };
     }
     const nextVersion = row.version + 1;
     this.store.updateWikiStatus(serviceId, wikiId, {
-      status: "pending",
+      status: row.active_version != null ? "ready" : "pending",
+      ingest_status: "pending",
+      building_version: nextVersion,
       internal_status: null,
       sync_error: null,
       version: nextVersion,
@@ -292,6 +309,52 @@ export class WikiService {
   /** sync 语义 = 重跑 ingest（管控显式触发）。 */
   sync(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string): IngestResult {
     return this.ingest(serviceId, teamId, wikiId, requesterUserId);
+  }
+
+  listVersions(serviceId: string, wikiId: string): WikiVersionItem[] | null {
+    const row = this.store.getWikiById(serviceId, wikiId);
+    if (!row) return null;
+    const manager = this.ensureManager(row);
+    return manager.versions(wikiId);
+  }
+
+  rollback(
+    serviceId: string,
+    wikiId: string,
+    targetVersion: number,
+    expectedActiveVersion?: number,
+    requesterUserId?: string,
+  ): RollbackResult {
+    const row = this.store.getWikiById(serviceId, wikiId);
+    if (!row) return { kind: "not_found" };
+    if (this.isBuildBusy(row)) return { kind: "busy" };
+    if (expectedActiveVersion !== undefined && row.active_version !== expectedActiveVersion) {
+      return { kind: "conflict", active_version: row.active_version };
+    }
+    const manager = this.ensureManager(row);
+    const target = manager.versions(wikiId).find(
+      (item) => item.version === targetVersion && item.state === "published",
+    );
+    if (!target) return { kind: "invalid_version", message: "published version not found" };
+    try {
+      manager.activate(wikiId, targetVersion, expectedActiveVersion);
+    } catch (err) {
+      return { kind: "invalid_version", message: err instanceof Error ? err.message : String(err) };
+    }
+    this.store.updateWikiStatus(serviceId, wikiId, {
+      status: "ready",
+      ingest_status: "idle",
+      active_version: targetVersion,
+      building_version: null,
+      internal_status: null,
+      sync_error: null,
+      page_count: target.page_count,
+      summary: target.summary,
+      last_sync_at: new Date().toISOString(),
+    });
+    const fresh = this.store.getWikiById(serviceId, wikiId)!;
+    this.audit(fresh, "rollback", `activate version ${targetVersion}`, requesterUserId);
+    return { kind: "ok", row: fresh, version: target };
   }
 
   get(serviceId: string, teamId: string, wikiId: string): WikiRow | null {
@@ -323,7 +386,7 @@ export class WikiService {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return false;
 
-    if (row.status === "pending" || row.status === "processing") {
+    if (this.isBuildBusy(row)) {
       this.cancelled.add(wikiId);
     }
 
@@ -405,7 +468,7 @@ export class WikiService {
     if (!row) return null;
     const dir = this.dirFor(serviceId, teamId, wikiId);
     try {
-      const db = getReadDb(wikiId, dir);
+      const db = getReadDb(wikiId, dir, sourceStateDbPath(dir));
       return listSources(db).map((s) => ({
         filename: s.filename,
         size: s.size,
@@ -492,8 +555,7 @@ export class WikiService {
   ): WriteOutcome<RawWriteResult> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
-    if (row.status === "processing") return "processing";
-
+    if (this.isBuildBusy(row) && row.internal_status === "publishing-manual-version") return "processing";
     const size = Buffer.byteLength(content, "utf-8");
     if (size > RAW_WRITE_MAX_BYTES) return "too_large";
 
@@ -502,6 +564,7 @@ export class WikiService {
     if (!safe) return "invalid_path";
 
     mkdirSync(sourcesDir, { recursive: true });
+    appendSourceHistory(this.dirFor(serviceId, teamId, wikiId), filename, content, userId);
     writeFileSync(safe, content, "utf-8");
     this.registerSources(serviceId, teamId, wikiId, [{ filename, content, size }], userId);
     return { filename, size };
@@ -523,7 +586,7 @@ export class WikiService {
   ): WriteOutcome<RawWriteManyItem[]> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
-    if (row.status === "processing") return "processing";
+    if (this.isBuildBusy(row) && row.internal_status === "publishing-manual-version") return "processing";
     if (files.length > RAW_WRITE_MAX) {
       throw new Error(`files exceeds max ${RAW_WRITE_MAX}`);
     }
@@ -556,6 +619,7 @@ export class WikiService {
     const written: Plan[] = [];
     try {
       for (const p of plans) {
+        appendSourceHistory(this.dirFor(serviceId, teamId, wikiId), p.filename, p.content, userId);
         writeFileSync(p.safePath, p.content, "utf-8");
         written.push(p);
       }
@@ -602,7 +666,7 @@ export class WikiService {
   ): Promise<WriteOutcome<RawRmResult>> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
-    if (row.status === "processing") return "processing";
+    if (this.isBuildBusy(row)) return "processing";
     if (filenames.length > RAW_RM_MAX) {
       throw new Error(`filenames exceeds max ${RAW_RM_MAX}`);
     }
@@ -616,29 +680,35 @@ export class WikiService {
       fullPaths.push(safe);
     }
 
-    // 自研级联删除：删 raw 源并清理引用它的 page（frontmatter sources 驱动）。
-    const { deleteSourceFiles } = await import(
-      "../engines/wiki/ingest-v2/cascade.js"
-    );
-    const result = await deleteSourceFiles(projectPath, fullPaths, {
-      logReason: "wiki/raw/rm",
+    const { deleteSourceFiles } = await import("../engines/wiki/ingest-v2/cascade.js");
+    const published = await this.publishManualMutationAsync(row, "raw_delete", async (candidateRoot) => {
+      const candidateSources = join(candidateRoot, "raw", "sources");
+      const result = await deleteSourceFiles(
+        candidateRoot,
+        filenames.map((filename) => join(candidateSources, filename)),
+        { logReason: "wiki/raw/rm" },
+      );
+      return {
+        deleted_files: filenames,
+        deleted_pages: result.deletedWikiPaths.map((p: string) => this.absToPageRef(candidateRoot, p)),
+        rewritten_pages: result.rewrittenSourcePages,
+      };
     });
-
-    // 删除对应 source 行（与文件级联删除对应，设计 003 §5）。
+    // The generated-page version is already durable. Now advance the mutable
+    // intake view; each removed source remains recoverable from source-history.
+    for (let i = 0; i < filenames.length; i++) {
+      appendSourceHistory(projectPath, filenames[i], null);
+      rmSync(fullPaths[i], { force: true });
+    }
     try {
-      initIndexDb(projectPath);
-      withWriteDb(projectPath, (db) => deleteSources(db, filenames));
+      const sourceIndex = sourceStateDbPath(projectPath);
+      initIndexDb(projectPath, sourceIndex);
+      withWriteDb(projectPath, (db) => deleteSources(db, filenames), sourceIndex);
+      evictWikiDb(wikiId);
     } catch (err) {
       this.logger?.warn?.(`[wiki] source rows delete failed: ${String(err)}`);
     }
-
-    return {
-      deleted_files: filenames,
-      deleted_pages: result.deletedWikiPaths.map((p: string) =>
-        this.absToPageRef(projectPath, p),
-      ),
-      rewritten_pages: result.rewrittenSourcePages,
-    };
+    return published;
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -652,15 +722,18 @@ export class WikiService {
   pageLs(serviceId: string, teamId: string, wikiId: string): { id: string; title: string; type: string; path: string; description?: string; locked?: boolean }[] | null {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
-    if (row.status !== "ready") return [];
-
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const wikiDir = join(projectPath, "wiki");
-    if (!existsSync(wikiDir)) return [];
-
-    const items: { id: string; title: string; type: string; path: string; description?: string; locked?: boolean }[] = [];
-    this.scanPagesRecursive(wikiDir, wikiDir, items);
-    return items;
+    if (row.status !== "ready" && row.active_version == null) return [];
+    return this.wikiManager.getPages(wikiId).map((page) => {
+      const fm = parseFrontmatterMin(page.content);
+      return {
+        id: page.id,
+        title: page.title,
+        type: page.type,
+        path: page.relPath,
+        ...(page.description ? { description: page.description } : {}),
+        locked: fm.locked,
+      };
+    });
   }
 
   /** 读单个 page 原文。ref 可以是 page id 或 relPath。 */
@@ -668,14 +741,7 @@ export class WikiService {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const safe = this.resolvePageRef(projectPath, ref);
-    if (!safe) return null;
-    try {
-      return readFileSync(safe, "utf-8");
-    } catch {
-      return null;
-    }
+    return this.wikiManager.readPage(wikiId, ref);
   }
 
   /**
@@ -696,24 +762,13 @@ export class WikiService {
     if (refs.length > PAGE_READ_MAX) {
       throw new Error(`refs exceeds max ${PAGE_READ_MAX}`);
     }
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const safePaths: string[] = [];
     for (const r of refs) {
-      // 读用 allowMissing 不行——not_found 也得是合法路径，所以这里
-      // 区分"路径合法但文件不存在（not_found）"与"路径非法（invalid_path）"
-      const safe = this.resolvePageRef(projectPath, r, { allowMissing: true });
-      if (!safe) return "invalid_path";
-      safePaths.push(safe);
+      if (!this.isValidPageRef(r)) return "invalid_path";
     }
     const items: PageReadItem[] = [];
-    for (let i = 0; i < refs.length; i++) {
-      const ref = refs[i];
-      try {
-        const content = readFileSync(safePaths[i], "utf-8");
-        items.push({ ref, content });
-      } catch {
-        items.push({ ref, not_found: true });
-      }
+    for (const ref of refs) {
+      const content = this.wikiManager.readPage(wikiId, ref);
+      items.push(content === null ? { ref, not_found: true } : { ref, content });
     }
     return items;
   }
@@ -735,22 +790,23 @@ export class WikiService {
   ): WriteOutcome<PageWriteResult> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
-    if (row.status === "processing") return "processing";
+    if (this.isBuildBusy(row)) return "processing";
 
     const size = Buffer.byteLength(content, "utf-8");
     if (size > PAGE_WRITE_MAX_BYTES) return "too_large";
 
     if (this.isForbiddenPageRef(ref)) return "forbidden_path";
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const safe = this.resolvePageRef(projectPath, ref, { allowMissing: true });
-    if (!safe) return "invalid_path";
-
     const { content: finalContent, lockedInjected } = injectLockedTrue(content);
-
-    mkdirSync(join(safe, ".."), { recursive: true });
-    writeFileSync(safe, finalContent, "utf-8");
-    return { ref, locked_injected: lockedInjected };
+    if (!this.isValidPageRef(ref)) return "invalid_path";
+    const published = this.publishManualMutation(row, "page_write", (candidateRoot) => {
+      const safe = this.resolvePageRef(candidateRoot, ref, { allowMissing: true });
+      if (!safe) throw new Error("invalid page path");
+      mkdirSync(join(safe, ".."), { recursive: true });
+      writeFileSync(safe, finalContent, "utf-8");
+      return { ref, locked_injected: lockedInjected };
+    });
+    return published;
   }
 
   /**
@@ -767,18 +823,15 @@ export class WikiService {
   ): WriteOutcome<PageWriteManyItem[]> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
-    if (row.status === "processing") return "processing";
+    if (this.isBuildBusy(row)) return "processing";
     if (pages.length > PAGE_WRITE_MAX) {
       throw new Error(`pages exceeds max ${PAGE_WRITE_MAX}`);
     }
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
     type Plan = {
       ref: string;
-      safePath: string;
       finalContent: string;
       lockedInjected: boolean;
-      preExistingContent: string | null;
     };
     const plans: Plan[] = [];
     for (const { ref, content } of pages) {
@@ -786,41 +839,19 @@ export class WikiService {
       if (this.isForbiddenPageRef(ref)) return "forbidden_path";
       const size = Buffer.byteLength(content, "utf-8");
       if (size > PAGE_WRITE_MAX_BYTES) return "too_large";
-      const safe = this.resolvePageRef(projectPath, ref, { allowMissing: true });
-      if (!safe) return "invalid_path";
+      if (!this.isValidPageRef(ref)) return "invalid_path";
       const { content: finalContent, lockedInjected } = injectLockedTrue(content);
-      let pre: string | null = null;
-      try {
-        pre = readFileSync(safe, "utf-8");
-      } catch {
-        pre = null;
-      }
-      plans.push({ ref, safePath: safe, finalContent, lockedInjected, preExistingContent: pre });
+      plans.push({ ref, finalContent, lockedInjected });
     }
-
-    const written: Plan[] = [];
-    try {
+    return this.publishManualMutation(row, "page_write", (candidateRoot) => {
       for (const p of plans) {
-        mkdirSync(join(p.safePath, ".."), { recursive: true });
-        writeFileSync(p.safePath, p.finalContent, "utf-8");
-        written.push(p);
+        const safe = this.resolvePageRef(candidateRoot, p.ref, { allowMissing: true });
+        if (!safe) throw new Error("invalid page path");
+        mkdirSync(join(safe, ".."), { recursive: true });
+        writeFileSync(safe, p.finalContent, "utf-8");
       }
-    } catch (err) {
-      for (const p of written) {
-        try {
-          if (p.preExistingContent === null) {
-            rmSync(p.safePath, { force: true });
-          } else {
-            writeFileSync(p.safePath, p.preExistingContent, "utf-8");
-          }
-        } catch {
-          // best-effort 回滚
-        }
-      }
-      throw err;
-    }
-
-    return plans.map(({ ref, lockedInjected }) => ({ ref, locked_injected: lockedInjected }));
+      return plans.map(({ ref, lockedInjected }) => ({ ref, locked_injected: lockedInjected }));
+    });
   }
 
   /**
@@ -839,36 +870,137 @@ export class WikiService {
   ): Promise<WriteOutcome<PageRmResult>> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
-    if (row.status === "processing") return "processing";
+    if (this.isBuildBusy(row)) return "processing";
     if (refs.length > PAGE_RM_MAX) {
       throw new Error(`refs exceeds max ${PAGE_RM_MAX}`);
     }
 
-    const projectPath = this.dirFor(serviceId, teamId, wikiId);
-    const fullPaths: string[] = [];
     for (const r of refs) {
       if (this.isForbiddenPageRef(r)) return "forbidden_path";
-      const safe = this.resolvePageRef(projectPath, r);
-      if (!safe) return "invalid_path";
-      fullPaths.push(safe);
+      if (!this.isValidPageRef(r)) return "invalid_path";
     }
 
     const { cascadeDeleteWikiPagesWithRefs } = await import(
       "../engines/wiki/ingest-v2/cascade.js"
     );
-    const result = await cascadeDeleteWikiPagesWithRefs(projectPath, fullPaths);
-
-    return {
-      deleted_pages: result.deletedPaths.map((p: string) =>
-        this.absToPageRef(projectPath, p),
-      ),
-      rewritten_files: result.rewrittenFiles,
-    };
+    return this.publishManualMutationAsync(row, "page_delete", async (candidateRoot) => {
+      const fullPaths = refs
+        .map((ref) => this.resolvePageRef(candidateRoot, ref))
+        .filter((path): path is string => path !== null);
+      const result = await cascadeDeleteWikiPagesWithRefs(candidateRoot, fullPaths);
+      return {
+        deleted_pages: result.deletedPaths.map((p: string) => this.absToPageRef(candidateRoot, p)),
+        rewritten_files: result.rewrittenFiles,
+      };
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════
   // 内部 helper
   // ═══════════════════════════════════════════════════════════════════
+
+  private isBuildBusy(row: WikiRow): boolean {
+    return row.ingest_status === "pending" || row.ingest_status === "processing";
+  }
+
+  private ensureManager(row: WikiRow): WikiSourceManager {
+    if (!this.wikiManager.get(row.wiki_id)) {
+      this.wikiManager.init({ name: row.wiki_id, path: this.dirFor(row.service_id, row.team_id, row.wiki_id) });
+    }
+    return this.wikiManager;
+  }
+
+  private publishManualMutation<T>(
+    row: WikiRow,
+    action: AuditAction,
+    mutate: (candidateRoot: string) => T,
+  ): T {
+    const manager = this.ensureManager(row);
+    const version = row.version + 1;
+    this.store.updateWikiStatus(row.service_id, row.wiki_id, {
+      version,
+      status: row.active_version != null ? "ready" : "processing",
+      ingest_status: "processing",
+      building_version: version,
+      internal_status: "publishing-manual-version",
+      sync_error: null,
+    });
+    try {
+      const result = manager.publishMutation(row.wiki_id, version, mutate);
+      manager.setVersionSummary(row.wiki_id, version, row.summary);
+      this.store.updateWikiStatus(row.service_id, row.wiki_id, {
+        status: "ready",
+        ingest_status: "idle",
+        active_version: version,
+        building_version: null,
+        internal_status: null,
+        sync_error: null,
+        page_count: result.pageCount,
+        last_sync_at: new Date().toISOString(),
+      });
+      const fresh = this.store.getWikiById(row.service_id, row.wiki_id);
+      if (fresh) this.audit(fresh, action, `published version ${version}`);
+      return result.value;
+    } catch (err) {
+      this.store.updateWikiStatus(row.service_id, row.wiki_id, {
+        status: row.active_version != null ? "ready" : "failed",
+        ingest_status: "failed",
+        building_version: null,
+        internal_status: null,
+        sync_error: String(err).slice(0, 500),
+      });
+      throw err;
+    }
+  }
+
+  private async publishManualMutationAsync<T>(
+    row: WikiRow,
+    action: AuditAction,
+    mutate: (candidateRoot: string) => Promise<T>,
+  ): Promise<T> {
+    const manager = this.ensureManager(row);
+    const version = row.version + 1;
+    this.store.updateWikiStatus(row.service_id, row.wiki_id, {
+      version,
+      status: row.active_version != null ? "ready" : "processing",
+      ingest_status: "processing",
+      building_version: version,
+      internal_status: "publishing-manual-version",
+      sync_error: null,
+    });
+    try {
+      const result = await manager.publishMutationAsync(row.wiki_id, version, mutate);
+      manager.setVersionSummary(row.wiki_id, version, row.summary);
+      this.store.updateWikiStatus(row.service_id, row.wiki_id, {
+        status: "ready",
+        ingest_status: "idle",
+        active_version: version,
+        building_version: null,
+        internal_status: null,
+        sync_error: null,
+        page_count: result.pageCount,
+        last_sync_at: new Date().toISOString(),
+      });
+      const fresh = this.store.getWikiById(row.service_id, row.wiki_id);
+      if (fresh) this.audit(fresh, action, `published version ${version}`);
+      return result.value;
+    } catch (err) {
+      this.store.updateWikiStatus(row.service_id, row.wiki_id, {
+        status: row.active_version != null ? "ready" : "failed",
+        ingest_status: "failed",
+        building_version: null,
+        internal_status: null,
+        sync_error: String(err).slice(0, 500),
+      });
+      throw err;
+    }
+  }
+
+  private isValidPageRef(ref: string): boolean {
+    if (!ref || ref.includes("..") || ref.startsWith("/") || ref.includes("\\")) return false;
+    const clean = ref.replace(/^wiki\//, "");
+    return clean.length > 0 && !clean.startsWith("/");
+  }
 
   /**
    * 登记一批源文件到 source 表（rawWrite/rawWriteMany 用）。
@@ -885,7 +1017,8 @@ export class WikiService {
   ): void {
     const dir = this.dirFor(serviceId, teamId, wikiId);
     try {
-      initIndexDb(dir);
+      const sourceIndex = sourceStateDbPath(dir);
+      initIndexDb(dir, sourceIndex);
       withWriteDb(dir, (db) => {
         for (const f of files) {
           upsertSource(db, {
@@ -895,7 +1028,7 @@ export class WikiService {
             userId: userId ?? null,
           });
         }
-      });
+      }, sourceIndex);
     } catch (err) {
       this.logger?.warn?.(`[wiki] source register failed for ${wikiId}: ${String(err)}`);
     }
@@ -965,60 +1098,24 @@ export class WikiService {
     return PAGE_FORBIDDEN_REFS.has(cleanRef) || PAGE_FORBIDDEN_REFS.has(`wiki/${cleanRef}`);
   }
 
-  private scanPagesRecursive(
-    baseDir: string,
-    dir: string,
-    out: { id: string; title: string; type: string; path: string; description?: string; locked?: boolean }[],
-  ): void {
-    if (!existsSync(dir)) return;
-    for (const entry of readdirSync(dir)) {
-      const full = join(dir, entry);
-      let st;
-      try {
-        st = statSync(full);
-      } catch {
-        continue;
-      }
-      if (st.isDirectory()) {
-        if (entry === "media") continue;
-        this.scanPagesRecursive(baseDir, full, out);
-        continue;
-      }
-      if (!entry.endsWith(".md")) continue;
-      let content = "";
-      try {
-        content = readFileSync(full, "utf-8");
-      } catch {
-        continue;
-      }
-      const rel = full.slice(baseDir.length + 1).replace(/\\/g, "/");
-      const id = rel.replace(/\.md$/, "");
-      const fm = parseFrontmatterMin(content);
-      out.push({
-        id,
-        title: fm.title || entry.replace(/\.md$/, "").replace(/-/g, " "),
-        type: fm.type || "other",
-        path: `wiki/${rel}`,
-        ...(fm.description ? { description: fm.description } : {}),
-        locked: fm.locked,
-      });
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════════
 
   private enqueueBuild(row: WikiRow): void {
-    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name));
+    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, row.version));
   }
 
-  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string): Promise<void> {
+  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string, version: number): Promise<void> {
     // 入口检查点：pending 期间被删 → 跳过，不置 processing、不 ingest。
     if (this.isDeleted(serviceId, wikiId)) {
       this.finishCancelled(serviceId, teamId, wikiId);
       return;
     }
+    const before = this.store.getWikiById(serviceId, wikiId);
+    const hasActiveVersion = before?.active_version != null;
     this.store.updateWikiStatus(serviceId, wikiId, {
-      status: "processing",
+      status: hasActiveVersion ? "ready" : "processing",
+      ingest_status: "processing",
+      building_version: version,
       internal_status: "scanning",
       sync_error: null,
     });
@@ -1032,8 +1129,13 @@ export class WikiService {
         name,
         dir: this.dirFor(serviceId, teamId, wikiId),
         setInternalStatus: (s) =>
-          this.store.updateWikiStatus(serviceId, wikiId, { status: "processing", internal_status: s }),
+          this.store.updateWikiStatus(serviceId, wikiId, {
+            status: hasActiveVersion ? "ready" : "processing",
+            ingest_status: "processing",
+            internal_status: s,
+          }),
         ingestRunId,
+        version,
       });
       // 结束前检查点：processing 期间被删 → 跳过 ready/audit/回调，幂等收尾清理。
       if (this.isDeleted(serviceId, wikiId)) {
@@ -1042,9 +1144,13 @@ export class WikiService {
       }
       this.store.updateWikiStatus(serviceId, wikiId, {
         status: "ready",
+        ingest_status: "idle",
+        active_version: version,
+        building_version: null,
         internal_status: null,
         sync_error: null,
         page_count: result?.pageCount ?? null,
+        summary: null,
         last_sync_at: new Date().toISOString(),
       });
       const synced = this.store.getWikiById(serviceId, wikiId);
@@ -1063,7 +1169,9 @@ export class WikiService {
         return;
       }
       this.store.updateWikiStatus(serviceId, wikiId, {
-        status: "failed",
+        status: hasActiveVersion ? "ready" : "failed",
+        ingest_status: "failed",
+        building_version: null,
         internal_status: null,
         sync_error: msg.slice(0, 500),
       });
@@ -1072,7 +1180,7 @@ export class WikiService {
       this.logger?.warn?.(`[wiki] ${wikiId} failed: ${msg}`);
 
       // Callback TMC about failure
-      await this.onBuildComplete(failed, "failed", msg, ingestRunId);
+      await this.onBuildComplete(failed, hasActiveVersion ? "ready" : "failed", msg, ingestRunId);
     }
   }
 
@@ -1090,7 +1198,7 @@ export class WikiService {
 
     let summary: string | null = null;
 
-    if (status === "ready") {
+    if (status === "ready" && !errorMsg) {
       // Generate summary via LLM (即使部分源失败也尝试生成——只要有页面就生成)
       try {
         const pages = this.pageLs(row.service_id, row.team_id, row.wiki_id) ?? [];
@@ -1105,6 +1213,9 @@ export class WikiService {
         this.logger?.info?.(`[wiki] summary generation done (wikiId=${row.wiki_id}, len=${summary?.length ?? 0}, empty=${!summary})`);
         if (summary) {
           this.store.updateWikiStatus(row.service_id, row.wiki_id, { summary });
+        }
+        if (row.active_version != null) {
+          this.wikiManager.setVersionSummary(row.wiki_id, row.active_version, summary);
         }
       } catch (err) {
         this.logger?.warn?.(`[wiki] summary generation failed: ${String(err)}`);

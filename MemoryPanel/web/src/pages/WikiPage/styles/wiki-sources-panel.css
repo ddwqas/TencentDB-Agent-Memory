@@ -690,3 +690,46 @@
   width: 100%;
   height: 100%;
 }
+._wiki-status-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+._wiki-version-list {
+  overflow-x: auto;
+  border-top: 1px solid var(--tea-color-border-secondary-default);
+}
+
+._wiki-version-row {
+  display: grid;
+  min-width: 680px;
+  grid-template-columns: 100px 120px 80px minmax(220px, 1fr) 64px;
+  align-items: center;
+  min-height: 48px;
+  border-bottom: 1px solid var(--tea-color-border-secondary-default);
+  color: var(--tea-color-text-secondary);
+  font-size: 13px;
+}
+
+._wiki-version-row--header {
+  min-height: 40px;
+  color: var(--tea-color-text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+._wiki-version-number {
+  color: var(--tea-color-text-primary);
+  font-family: Consolas, Monaco, 'Courier New', monospace;
+  font-weight: 600;
+}
+
+._wiki-version-error {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+  padding: 0 0 10px;
+  color: var(--tea-color-text-error-default);
+  font-size: 12px;
+}

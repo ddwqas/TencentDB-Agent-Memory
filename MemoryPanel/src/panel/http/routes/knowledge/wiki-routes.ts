@@ -113,7 +113,7 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
     const kc = deps.knowledgeClientFactory(ctx.instanceId);
     return runKs(c, async () => {
       const detail = await kc.wikiGet(wikiId);
-      const status = (detail as { status?: string } | null)?.status;
+      const status = (detail as { ingest_status?: string } | null)?.ingest_status;
       const stored =
         status === 'processing' ? deps.ingestProgressStore.get(wikiId) : null;
       return {
@@ -121,6 +121,35 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
         progress: stored,
       };
     });
+  });
+
+  api.post('/knowledge/wiki/version/list', mw, async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const wikiId = str(body, 'wiki_id');
+    if (!wikiId) return respondControlError(c, 400, 'MISSING_WIKI_ID');
+    const gate = await requireKnowledgeRead(deps, c, ctx, wikiId);
+    if ('error' in gate) return gate.error;
+    const kc = deps.knowledgeClientFactory(ctx.instanceId);
+    return runKs(c, () => kc.wikiVersionList(wikiId));
+  });
+
+  api.post('/knowledge/wiki/version/rollback', mw, async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const wikiId = str(body, 'wiki_id');
+    if (!wikiId) return respondControlError(c, 400, 'MISSING_WIKI_ID');
+    if (!Number.isInteger(body.target_version) || !Number.isInteger(body.expected_active_version)) {
+      return respondControlError(c, 400, 'INVALID_WIKI_VERSION');
+    }
+    const gate = await requireKnowledgeRead(deps, c, ctx, wikiId, { action: 'write' });
+    if ('error' in gate) return gate.error;
+    const kc = deps.knowledgeClientFactory(ctx.instanceId);
+    return runKs(c, () => kc.wikiVersionRollback(
+      wikiId,
+      Number(body.target_version),
+      Number(body.expected_active_version),
+    ));
   });
 
   // W5 delete — 删三处：KS + entity_knowledge 明细 + meta_asset（见 §0.6）

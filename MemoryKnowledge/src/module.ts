@@ -219,7 +219,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
 
   // ── Real wiki worker: ingest via wiki engine ──
   const realWikiWorker: WikiWorker = async (ctx) => {
-    const { wikiId, serviceId, teamId, dir, setInternalStatus, ingestRunId } = ctx;
+    const { wikiId, serviceId, teamId, dir, setInternalStatus, ingestRunId, version } = ctx;
     setInternalStatus("ingesting");
 
     // Per-instance LLM routing (proxy/byo/global fallback), keyed by service_id.
@@ -241,7 +241,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
         timeoutMs: effectiveLlm.timeoutMs,
         stream: effectiveLlm.stream ?? false,
       },
-      { onProgress, globalLlmLimit },
+      { onProgress, globalLlmLimit, version },
     );
     setInternalStatus("rebuilding-index");
 
@@ -262,6 +262,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
     queue: sharedQueue,
     logger: { info: log.info.bind(log), warn: log.warn.bind(log), error: log.error.bind(log) },
     callbackConfig,
+    wikiManager: wikiMgr,
   });
   const cgService = new CodeGraphService({
     store,
@@ -318,11 +319,21 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
       for (const row of allSyncedWikis) {
         const dir = join(dataDir, row.service_id, row.team_id, row.wiki_id);
         try {
-          wikiMgr.restore({ name: row.wiki_id, path: dir });
+          const restoredState = wikiMgr.restore({ name: row.wiki_id, path: dir });
           const pages = wikiMgr.getPages(row.wiki_id);
-          if (pages.length > 0) {
-            store.updateWikiStatus(row.service_id, row.wiki_id, { page_count: pages.length });
+          if (restoredState.activeVersion != null) {
+            wikiMgr.setVersionSummary(row.wiki_id, restoredState.activeVersion, row.summary);
           }
+          store.updateWikiStatus(row.service_id, row.wiki_id, {
+            status: "ready",
+            ingest_status:
+              restoredState.activeVersion != null && restoredState.activeVersion !== row.active_version
+                ? "idle"
+                : row.ingest_status,
+            active_version: restoredState.activeVersion ?? row.active_version,
+            building_version: null,
+            page_count: pages.length,
+          });
           log.info(`[wiki] restored index ${row.wiki_id} (${pages.length} pages)`);
         } catch (err) {
           log.warn(`[wiki] failed to restore ${row.wiki_id}: ${err instanceof Error ? err.message : String(err)}`);

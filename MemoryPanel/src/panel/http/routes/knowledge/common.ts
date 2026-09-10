@@ -383,6 +383,9 @@ export interface KnowledgeAssetListItem {
   meta_status: string;
   status: string;
   internal_status?: string | null;
+  ingest_status?: string;
+  active_version?: number | null;
+  building_version?: number | null;
   sync_error?: string | null;
   ks_missing?: boolean;
   team_id?: string;
@@ -422,6 +425,9 @@ async function joinWikiKs(
       team_id: ks.team_id,
       status: ks.status,
       internal_status: ks.internal_status ?? null,
+      ingest_status: ks.ingest_status,
+      active_version: ks.active_version,
+      building_version: ks.building_version,
       sync_error: ks.sync_error,
       summary: ks.summary,
       page_count: ks.page_count,
@@ -535,6 +541,9 @@ async function fetchKsOnlyItems(
         status: ks.status,
         team_id: ks.team_id,
         internal_status: ks.internal_status ?? null,
+        ingest_status: ks.ingest_status,
+        active_version: ks.active_version,
+        building_version: ks.building_version,
         sync_error: ks.sync_error,
         summary: ks.summary,
         page_count: ks.page_count,

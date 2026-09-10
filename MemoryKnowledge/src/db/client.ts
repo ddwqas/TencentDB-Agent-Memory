@@ -94,6 +94,9 @@ export function migrate(_db: Db, raw: Database.Database): void {
       task_id         TEXT,
       visibility      TEXT NOT NULL DEFAULT 'team',
       status          TEXT NOT NULL DEFAULT 'draft',
+      ingest_status   TEXT NOT NULL DEFAULT 'idle',
+      active_version  INTEGER,
+      building_version INTEGER,
       internal_status TEXT,
       sync_error      TEXT,
       page_count      INTEGER,
@@ -162,6 +165,9 @@ export function migrate(_db: Db, raw: Database.Database): void {
   addColumnIfMissing(raw, "knowledge_wiki", "service_url", "TEXT");
   addColumnIfMissing(raw, "knowledge_wiki", "summary", "TEXT");
   addColumnIfMissing(raw, "knowledge_wiki", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(raw, "knowledge_wiki", "ingest_status", "TEXT NOT NULL DEFAULT 'idle'");
+  addColumnIfMissing(raw, "knowledge_wiki", "active_version", "INTEGER");
+  addColumnIfMissing(raw, "knowledge_wiki", "building_version", "INTEGER");
   // 普通 create 仍由唯一索引保证并发幂等；带 migration metadata 的导入行
   // 不参与该索引，因此同 repo/branch 可以追加为多个独立快照。
   raw.exec("DROP INDEX IF EXISTS idx_kcg_team_repo_branch");

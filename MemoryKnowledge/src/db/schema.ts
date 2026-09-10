@@ -69,6 +69,9 @@ export const knowledgeWiki = sqliteTable(
     visibility: text("visibility").notNull().default("team"),
     // draft = 建壳未加工（仅 create 一次性出现）；code-graph 仍用 pending（create 即建图）。
     status: text("status").notNull().default("draft"),
+    ingestStatus: text("ingest_status").notNull().default("idle"),
+    activeVersion: integer("active_version"),
+    buildingVersion: integer("building_version"),
     internalStatus: text("internal_status"),
     syncError: text("sync_error"),
     pageCount: integer("page_count"),

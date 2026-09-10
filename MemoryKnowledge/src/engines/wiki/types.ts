@@ -20,6 +20,10 @@ export interface WikiPage {
   links: string[];    // outbound [[wikilinks]]
   /** Optional frontmatter `description` — used as snippet fallback for graph-expanded hits. */
   description?: string;
+  /** Immutable page layer used by a versioned index. */
+  storageKey?: string;
+  /** Path below the referenced version directory, normally wiki/<page>.md. */
+  storageRelPath?: string;
 }
 
 export interface GraphNode {
@@ -92,6 +96,8 @@ export interface WikiSourceState {
   error?: string;
   pageCount?: number;
   lastSyncAt?: string;
+  activeVersion?: number;
+  activeVersionKey?: string;
 }
 
 export const GENERATION_WIKI_TYPES = [

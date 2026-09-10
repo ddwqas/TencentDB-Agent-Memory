@@ -10,11 +10,25 @@ import { StatusTag } from '@/components/StatusTag';
 import { OwnerLabel } from '@/components/OwnerLabel';
 import { WIKI_STATUS_KEY, WIKI_STATUS_THEME } from '../constants/wiki-constants';
 
-export function WikiStatusBadge({ status }: { status: WikiDetail['status'] }) {
+export function WikiStatusBadge({
+  status,
+  ingestStatus,
+}: {
+  status: WikiDetail['status'];
+  ingestStatus?: WikiDetail['ingest_status'];
+}) {
   const { t } = useTranslation();
   const theme = WIKI_STATUS_THEME[status] ?? ('default' as const);
   const label = WIKI_STATUS_KEY[status] ? t(WIKI_STATUS_KEY[status]) : status;
-  return <StatusTag label={label} theme={theme} />;
+  const building = ingestStatus === 'pending' || ingestStatus === 'processing';
+  const updateFailed = status === 'ready' && ingestStatus === 'failed';
+  return (
+    <span className="_wiki-status-tags">
+      <StatusTag label={label} theme={theme} />
+      {building && <StatusTag label={t('wiki.status.updating')} theme="warning" />}
+      {updateFailed && <StatusTag label={t('wiki.status.updateFailed')} theme="error" />}
+    </span>
+  );
 }
 
 /**

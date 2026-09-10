@@ -1,7 +1,7 @@
 /**
- * Wiki Routes — 15 endpoints (Hono rewrite).
+ * Wiki Routes — version-aware asset, file, search, and rollback endpoints.
  *
- * Asset (5): create / get / list / delete / ingest
+ * Asset: create / get / list / delete / ingest + version/{list,rollback}
  * File (8): raw/{ls,read,write,rm} + page/{ls,read,write,rm}
  * Derived (2): graph / search
  *
@@ -51,15 +51,6 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
   const app = new Hono();
   const { wikiService, wikiMgr, publicBaseUrl } = deps;
 
-  function syncRegisteredWiki(wikiId: string, operation: string): void {
-    if (!wikiMgr.get(wikiId)) return;
-    try {
-      wikiMgr.sync(wikiId);
-    } catch (err) {
-      console.warn(`[wiki] wikiMgr.sync(${wikiId}) failed after ${operation}:`, err);
-    }
-  }
-
   // ═══════════════════ Asset Layer ═══════════════════
 
   // ── id-only (service_id + wiki_id) ──
@@ -100,6 +91,47 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       return c.json({ code: 409, message: "busy", data: { status: result.status, step: result.step } }, 409);
     }
     return c.json(wrapOk({ wiki_id: result.row.wiki_id, status: result.row.status }), 202);
+  });
+
+  app.post("/version/list", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>();
+    const serviceId = c.req.header("x-tdai-service-id");
+    if (!isValidIdSegment(serviceId)) return c.json(wrapError(400, "x-tdai-service-id header is required"), 400);
+    const wikiId = body.wiki_id;
+    if (!isValidIdSegment(wikiId)) return c.json(wrapError(400, "wiki_id is required"), 400);
+    const items = wikiService.listVersions(serviceId, wikiId);
+    if (!items) return c.json(wrapError(404, "wiki not found"), 404);
+    return c.json(wrapOk({ items }));
+  });
+
+  app.post("/version/rollback", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>();
+    const serviceId = c.req.header("x-tdai-service-id");
+    if (!isValidIdSegment(serviceId)) return c.json(wrapError(400, "x-tdai-service-id header is required"), 400);
+    const wikiId = body.wiki_id;
+    if (!isValidIdSegment(wikiId)) return c.json(wrapError(400, "wiki_id is required"), 400);
+    const targetVersion = body.target_version;
+    const expectedActiveVersion = body.expected_active_version;
+    if (!Number.isInteger(targetVersion) || Number(targetVersion) < 0) {
+      return c.json(wrapError(400, "target_version must be a non-negative integer"), 400);
+    }
+    if (!Number.isInteger(expectedActiveVersion) || Number(expectedActiveVersion) < 0) {
+      return c.json(wrapError(400, "expected_active_version must be a non-negative integer"), 400);
+    }
+    const result = wikiService.rollback(
+      serviceId,
+      wikiId,
+      Number(targetVersion),
+      Number(expectedActiveVersion),
+      typeof body.user_id === "string" ? body.user_id : undefined,
+    );
+    if (result.kind === "not_found") return c.json(wrapError(404, "wiki not found"), 404);
+    if (result.kind === "busy") return c.json(wrapError(409, "wiki is building"), 409);
+    if (result.kind === "conflict") {
+      return c.json({ code: 409, message: "active version changed", data: { active_version: result.active_version } }, 409);
+    }
+    if (result.kind === "invalid_version") return c.json(wrapError(409, result.message), 409);
+    return c.json(wrapOk({ wiki: toWikiDetail(result.row), version: result.version }));
   });
 
   app.post("/delete", async (c) => {
@@ -330,7 +362,6 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       const result = await wikiService.rawRm(ids.service_id, ids.team_id, wikiId, filenames);
       const err = maybeWriteError(result);
       if (err) return err;
-      syncRegisteredWiki(wikiId, "raw/rm");
       return c.json(wrapOk(result));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -419,7 +450,6 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       const result = wikiService.pageWriteMany(ids.service_id, ids.team_id, wikiId, validated);
       const err = maybeWriteError(result);
       if (err) return err;
-      syncRegisteredWiki(wikiId, "page/write");
       return c.json(wrapOk({ items: result }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -446,7 +476,6 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       const result = await wikiService.pageRm(ids.service_id, ids.team_id, wikiId, refs);
       const err = maybeWriteError(result);
       if (err) return err;
-      syncRegisteredWiki(wikiId, "page/rm");
       return c.json(wrapOk(result));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

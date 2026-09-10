@@ -2,7 +2,9 @@
  * WikiDetailView —— Wiki 详情视图（概览 / 图谱 / 页面 / 搜索 四个 Tab + 添加文档 Modal）。
  * 全部数据与回调来自 useWikiSources 的返回对象，组件只做渲染。
  */
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { History, RotateCcw } from 'lucide-react';
 import { Alert, Button, Card, Input, MetricsBoard, Modal, Progress, SearchBox, StatusTip, TabPanel, Tabs, Tag, Text } from 'tea-component';
 import {
   ArrowLeftIcon,
@@ -19,7 +21,7 @@ import {
   SearchIcon,
   StarIcon,
 } from 'tea-icons-react';
-import { knowledgeApi } from '@/lib/api/knowledge-api';
+import { knowledgeApi, type WikiVersionItem } from '@/lib/api/knowledge-api';
 import { tea } from '@/lib/tea-bridge';
 import { WIKI_ALLOWED_FILE_RE, TYPE_COLORS, TYPE_COLOR_FALLBACK, type DetailTab } from '../constants/wiki-constants';
 import { WikiStatusBadge } from './wiki-ui';
@@ -77,6 +79,45 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
 
   const source = sources.find((s) => s.wiki_id === selectedWikiId);
   const wikiName = source?.name ?? '';
+  const [showVersions, setShowVersions] = useState(false);
+  const [versions, setVersions] = useState<WikiVersionItem[]>([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [rollbackVersion, setRollbackVersion] = useState<number | null>(null);
+
+  const openVersions = async () => {
+    setShowVersions(true);
+    setVersionsLoading(true);
+    try {
+      setVersions(await knowledgeApi.wiki.versions(selectedWikiId));
+    } catch (error) {
+      tea.notify.error(error);
+    } finally {
+      setVersionsLoading(false);
+    }
+  };
+
+  const handleRollback = async (version: WikiVersionItem) => {
+    if (source?.active_version === null || source?.active_version === undefined) return;
+    const confirmed = await tea.confirm({
+      message: t('wiki.version.rollbackConfirm', { version: version.version }),
+      description: t('wiki.version.rollbackDesc'),
+      okText: t('wiki.version.rollback'),
+      cancelText: t('common.cancel'),
+    });
+    if (!confirmed) return;
+    setRollbackVersion(version.version);
+    try {
+      await knowledgeApi.wiki.rollback(selectedWikiId, version.version, source.active_version);
+      tea.notify.success(t('wiki.version.rollbackSuccess', { version: version.version }));
+      setVersions(await knowledgeApi.wiki.versions(selectedWikiId));
+      await fetchSources();
+      await store.fetchDetail(selectedWikiId);
+    } catch (error) {
+      tea.notify.error(error);
+    } finally {
+      setRollbackVersion(null);
+    }
+  };
 
   // 选中 Wiki 已不存在（被删除或刷新失败）时给出可返回的空态，避免死胡同
   if (!source) {
@@ -107,9 +148,12 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
             <div className="_wiki-detail-header-info">
               <BooksIcon size={20} />
               <span className="_wiki-detail-title">{wikiName}</span>
-              {source && <WikiStatusBadge status={source.status} />}
+              {source && <WikiStatusBadge status={source.status} ingestStatus={source.ingest_status} />}
             </div>
             <div className="_wiki-detail-header-actions">
+              <Button type="text" onClick={openVersions}>
+                <History size={14} /> {t('wiki.version.history')}
+              </Button>
               <Button
                 type="text"
                 onClick={() => {
@@ -442,6 +486,64 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
           </div>
         </TabPanel>
       </Tabs>
+
+      {showVersions && (
+        <Modal
+          visible
+          caption={t('wiki.version.title')}
+          size="l"
+          onClose={() => setShowVersions(false)}
+          disableEscape={rollbackVersion !== null}
+        >
+          <Modal.Body>
+            {versionsLoading ? (
+              <StatusTip status="loading" />
+            ) : versions.length === 0 ? (
+              <StatusTip status="empty" emptyText={t('wiki.version.empty')} />
+            ) : (
+              <div className="_wiki-version-list">
+                <div className="_wiki-version-row _wiki-version-row--header">
+                  <span>{t('wiki.version.version')}</span>
+                  <span>{t('wiki.version.state')}</span>
+                  <span>{t('wiki.version.pages')}</span>
+                  <span>{t('wiki.version.time')}</span>
+                  <span>{t('wiki.version.action')}</span>
+                </div>
+                {versions.map((version) => (
+                  <div className="_wiki-version-row" key={version.version_key}>
+                    <span className="_wiki-version-number">v{version.version}</span>
+                    <span>
+                      <Tag size="sm">
+                        {version.active
+                          ? t('wiki.version.active')
+                          : t(`wiki.version.state.${version.state}`)}
+                      </Tag>
+                    </span>
+                    <span>{version.page_count}</span>
+                    <span title={version.published_at ?? version.failed_at ?? version.created_at}>
+                      {new Date(version.published_at ?? version.failed_at ?? version.created_at).toLocaleString()}
+                    </span>
+                    <span>
+                      {version.state === 'published' && !version.active && (
+                        <Button
+                          type="icon"
+                          tooltip={t('wiki.version.rollback')}
+                          loading={rollbackVersion === version.version}
+                          disabled={rollbackVersion !== null || source.ingest_status === 'pending' || source.ingest_status === 'processing'}
+                          onClick={() => handleRollback(version)}
+                        >
+                          <RotateCcw size={14} />
+                        </Button>
+                      )}
+                    </span>
+                    {version.error && <div className="_wiki-version-error">{version.error}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Modal.Body>
+        </Modal>
+      )}
 
       {/* Add Doc Modal */}
       {store.showAddDoc && (

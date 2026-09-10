@@ -22,6 +22,7 @@ import unzipper from "unzipper";
 
 import type { WikiSourceManager } from "../engines/wiki/index.js";
 import { evictWikiDb } from "../engines/wiki/index-db.js";
+import { bootstrapLegacyWiki, getVersionDir } from "../engines/wiki/version-store.js";
 import type { CodeGraphInstancePool } from "../module.js";
 import type { CodeGraphService, WikiService } from "../store/index.js";
 import type { CodeGraphRow, IKnowledgeStore, WikiRow } from "../store/types.js";
@@ -222,9 +223,28 @@ export class KnowledgeSnapshotService {
         if (!row || row.status !== "ready") throw new Error("wiki is not ready or not found");
         evictWikiDb(id);
         const source = this.deps.wikiService.dirFor(row.service_id, row.team_id, row.wiki_id);
+        const active = bootstrapLegacyWiki(source, row.active_version ?? row.version);
+        if (!active) throw new Error("wiki has no published version");
         copyTree(join(source, "raw"), join(dataDir, "raw"));
-        copyTree(join(source, "wiki"), join(dataDir, "wiki"));
-        sqliteSnapshot(join(source, "index.db"), join(dataDir, "index.db"));
+        copyTree(join(getVersionDir(source, active.version_key), "wiki"), join(dataDir, "wiki"));
+        // Materialize the complete logical view. An active index may reuse an
+        // unchanged page from an older layer, which is not otherwise portable.
+        for (const page of this.deps.wikiMgr.getPages(id)) {
+          const target = safeArchivePath(dataDir, page.relPath);
+          mkdirSync(dirname(target), { recursive: true });
+          writeFileSync(target, page.content, "utf8");
+        }
+        copyFileSync(join(source, active.index_file), join(dataDir, "index.db"));
+        const portableIndex = new Database(join(dataDir, "index.db"));
+        try {
+          const columns = portableIndex.pragma("table_info(page_meta)") as Array<{ name: string }>;
+          if (columns.some((column) => column.name === "storage_key")) {
+            portableIndex.prepare("UPDATE page_meta SET storage_key = NULL, storage_rel_path = rel_path").run();
+          }
+        } finally {
+          portableIndex.close();
+        }
+        validateSqlite(join(dataDir, "index.db"), "wiki index.db");
         manifest = {
           schema: "tdai-knowledge-snapshot", version: 1, kind, source_id: id,
           source_name: row.name, exported_at: new Date().toISOString(),
@@ -298,7 +318,16 @@ export class KnowledgeSnapshotService {
         const target = this.deps.wikiService.dirFor(input.serviceId, input.teamId, created.wiki_id);
         mkdirSync(dirname(target), { recursive: true });
         copyTree(data, target);
-        this.deps.wikiMgr.restore({ name: created.wiki_id, path: target });
+        const restored = this.deps.wikiMgr.restore({ name: created.wiki_id, path: target });
+        this.deps.wikiMgr.setVersionSummary(created.wiki_id, restored.activeVersion ?? 0, created.summary);
+        this.deps.store.updateWikiStatus(input.serviceId, created.wiki_id, {
+          status: "ready",
+          ingest_status: "idle",
+          active_version: restored.activeVersion ?? 0,
+          building_version: null,
+          page_count: restored.pageCount ?? created.page_count,
+        });
+        created = this.deps.store.getWikiById(input.serviceId, created.wiki_id) ?? created;
         this.deps.store.appendWikiAudit({ service_id: input.serviceId, asset_id: created.wiki_id, version: created.version, action: "create", user_id: input.userId, detail: migration });
         return created;
       }

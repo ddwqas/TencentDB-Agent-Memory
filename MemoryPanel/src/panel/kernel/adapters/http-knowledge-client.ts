@@ -15,6 +15,7 @@ import type {
   WikiDetail,
   WikiListResult,
   WikiIngestResult,
+  WikiVersionItem,
   WikiGraphData,
   WikiSearchResult,
   BatchDeleteResult,
@@ -181,6 +182,22 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
 
   async wikiList(teamId: string, opts?: { status?: string; limit?: number; offset?: number }): Promise<WikiListResult> {
     return this.post('/v3/wiki/list', { team_id: teamId, ...opts });
+  }
+
+  async wikiVersionList(wikiId: string): Promise<{ items: WikiVersionItem[] }> {
+    return this.post('/v3/wiki/version/list', { wiki_id: wikiId });
+  }
+
+  async wikiVersionRollback(
+    wikiId: string,
+    targetVersion: number,
+    expectedActiveVersion: number,
+  ): Promise<{ wiki: WikiDetail; version: WikiVersionItem }> {
+    return this.post('/v3/wiki/version/rollback', {
+      wiki_id: wikiId,
+      target_version: targetVersion,
+      expected_active_version: expectedActiveVersion,
+    });
   }
 
   // ═══════════════ Wiki · raw 文件层 ═══════════════

@@ -321,6 +321,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
             taskId: input.task_id ?? null,
             visibility: input.visibility ?? "team",
             status: "draft",
+            ingestStatus: "idle",
             serviceUrl: input.service_url ?? null,
             version: WIKI_DATA_VERSION,
             createdAt: ts,
@@ -365,6 +366,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
           ownerUserId: input.owner_user_id ?? null, userId: input.user_id ?? null,
           agentId: null, taskId: null, visibility: input.visibility ?? "team",
           status: "ready", internalStatus: null, syncError: null,
+          ingestStatus: "idle",
           pageCount: input.page_count ?? null, serviceUrl: input.service_url ?? null,
           summary: input.summary ?? null, metadataJson: input.metadata_json ?? "{}",
           version: WIKI_DATA_VERSION, lastSyncAt: input.last_sync_at ?? ts,
@@ -447,6 +449,9 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
   updateWikiStatus(serviceId: string, wikiId: string, patch: WikiStatusPatch): void {
     const set: Record<string, unknown> = { updatedAt: nowIso() };
     if (patch.status !== undefined) set.status = patch.status;
+    if (patch.ingest_status !== undefined) set.ingestStatus = patch.ingest_status;
+    if (patch.active_version !== undefined) set.activeVersion = patch.active_version;
+    if (patch.building_version !== undefined) set.buildingVersion = patch.building_version;
     if (patch.internal_status !== undefined) set.internalStatus = patch.internal_status;
     if (patch.sync_error !== undefined) set.syncError = patch.sync_error;
     if (patch.page_count !== undefined) set.pageCount = patch.page_count;
@@ -601,12 +606,17 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       .set({ status: "failed", syncError: reason, updatedAt: ts })
       .where(sql`status IN ('pending','processing')`)
       .run();
-    const b = this.db
+    const bActive = this.db
       .update(knowledgeWiki)
-      .set({ status: "failed", syncError: reason, updatedAt: ts })
-      .where(sql`status IN ('pending','processing')`)
+      .set({ status: "ready", ingestStatus: "failed", buildingVersion: null, internalStatus: null, syncError: reason, updatedAt: ts })
+      .where(sql`ingest_status IN ('pending','processing') AND active_version IS NOT NULL`)
       .run();
-    return a.changes + b.changes;
+    const bInitial = this.db
+      .update(knowledgeWiki)
+      .set({ status: "failed", ingestStatus: "failed", buildingVersion: null, internalStatus: null, syncError: reason, updatedAt: ts })
+      .where(sql`(ingest_status IN ('pending','processing') OR status IN ('pending','processing')) AND active_version IS NULL`)
+      .run();
+    return a.changes + bActive.changes + bInitial.changes;
   }
 
   /** All ready code-graphs (with service_id) so module.ts can rebuild per-tenant dirs. */
@@ -628,17 +638,24 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
   }
 
   listSyncedWikis(): SyncedWikiRef[] {
-    return this.db
+    const rows = this.db
       .select({
         wiki_id: knowledgeWiki.wikiId,
         service_id: knowledgeWiki.serviceId,
         team_id: knowledgeWiki.teamId,
+        active_version: knowledgeWiki.activeVersion,
+        ingest_status: knowledgeWiki.ingestStatus,
+        summary: knowledgeWiki.summary,
       })
       .from(knowledgeWiki)
       .where(
-        and(eq(knowledgeWiki.status, "ready"), isNull(knowledgeWiki.deletedAt)),
+        and(sql`${knowledgeWiki.status} <> 'draft'`, isNull(knowledgeWiki.deletedAt)),
       )
       .all();
+    return rows.map((row) => ({
+      ...row,
+      ingest_status: row.ingest_status as SyncedWikiRef["ingest_status"],
+    }));
   }
 
   // ═══════════════════════ Mappers ═══════════════════════
@@ -685,7 +702,10 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       agent_id: r.agentId,
       task_id: r.taskId,
       visibility: r.visibility,
-      status: r.status as SyncStatus,
+      status: r.status as WikiRow["status"],
+      ingest_status: (r.ingestStatus ?? "idle") as WikiRow["ingest_status"],
+      active_version: r.activeVersion ?? null,
+      building_version: r.buildingVersion ?? null,
       internal_status: r.internalStatus,
       sync_error: r.syncError,
       page_count: r.pageCount,

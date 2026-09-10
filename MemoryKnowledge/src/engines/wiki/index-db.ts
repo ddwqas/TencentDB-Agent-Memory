@@ -1,8 +1,8 @@
 /**
- * Per-wiki `index.db` connection management (设计 006).
+ * Per-version Wiki SQLite connection management.
  *
- * 每个 wiki 一个独立 SQLite 文件 `index.db`，放在该 wiki 的数据目录下（与正文 `.md`
- * 同目录同生命周期），承载本 wiki 的全部私有索引数据：
+ * Published generations use immutable `index-vN.db` files; source-state.db is
+ * the mutable intake registry. Each database carries:
  *   - `wiki_fts`   FTS5 预分词倒排（BM25 全文检索）
  *   - `page_meta`  页元数据（title/type/rel_path/snippet；正文不入库，留磁盘）
  *   - `graph_edge` 知识图谱有向边（多跳 BFS 用）
@@ -23,7 +23,7 @@
 import Database from "better-sqlite3";
 import { LRUCache } from "lru-cache";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 
 /**
@@ -42,12 +42,11 @@ const CACHE_KB = 2000;
 /** 驱逐/关闭一个读连接：先 checkpoint 合并 WAL，再关闭。失败静默（连接可能已损坏）。 */
 function disposeDb(db: Database.Database): void {
   try {
-    if (db.open) {
-      db.pragma("wal_checkpoint(TRUNCATE)");
-      db.close();
-    }
+    if (db.open && !db.readonly) db.pragma("wal_checkpoint(TRUNCATE)");
   } catch {
-    /* best-effort：连接可能已被关闭或文件已删 */
+    /* best-effort checkpoint */
+  } finally {
+    try { if (db.open) db.close(); } catch { /* connection may already be closed */ }
   }
 }
 
@@ -66,6 +65,13 @@ function applyPragmas(db: Database.Database): void {
   db.pragma("synchronous = NORMAL"); // WAL 下安全且快
   db.pragma(`cache_size = -${CACHE_KB}`); // 每连接 page cache 上限（负数=KB）
   db.pragma("busy_timeout = 5000"); // 写锁最多等 5s，避免偶发 SQLITE_BUSY
+}
+
+/** Published indexes are immutable and are always opened read-only. */
+function applyReadPragmas(db: Database.Database): void {
+  db.pragma(`cache_size = -${CACHE_KB}`);
+  db.pragma("busy_timeout = 5000");
+  db.pragma("query_only = ON");
 }
 
 /** 建 4 张表（幂等）。仅在 initIndexDb（wiki 显式创建）时调用。 */
@@ -88,9 +94,18 @@ function initSchema(db: Database.Database): void {
        title     TEXT,
        type      TEXT,
        rel_path  TEXT,
-       snippet   TEXT
+       snippet   TEXT,
+       storage_key TEXT,
+       storage_rel_path TEXT
      );`,
   );
+  const pageColumns = db.pragma("table_info(page_meta)") as Array<{ name: string }>;
+  if (!pageColumns.some((column) => column.name === "storage_key")) {
+    db.exec("ALTER TABLE page_meta ADD COLUMN storage_key TEXT");
+  }
+  if (!pageColumns.some((column) => column.name === "storage_rel_path")) {
+    db.exec("ALTER TABLE page_meta ADD COLUMN storage_rel_path TEXT");
+  }
 
   // ③ 图谱有向边（多跳 BFS 用；查询时读进内存构建小图，图谱数据小）。
   db.exec(
@@ -118,16 +133,22 @@ function initSchema(db: Database.Database): void {
   );
 }
 
-function dbPath(wikiDir: string): string {
-  return join(wikiDir, "index.db");
+function dbPath(wikiDir: string, indexPath?: string): string {
+  return indexPath ?? join(wikiDir, "index.db");
 }
 
 /**
  * ★ 显式建库：在 wiki 创建接口里调一次，建好 4 张表。幂等（IF NOT EXISTS）。
  * 此后 getReadDb / withWriteDb 只打开已存在的库、不建表。
  */
-export function initIndexDb(wikiDir: string): void {
-  const db = new Database(dbPath(wikiDir));
+export function initIndexDb(wikiDir: string, indexPath?: string): void {
+  const path = dbPath(wikiDir, indexPath);
+  const parent = dirname(path);
+  if (!existsSync(parent)) {
+    // better-sqlite3 cannot create a missing parent directory.
+    throw new Error(`index parent directory missing: ${parent}`);
+  }
+  const db = new Database(path);
   applyPragmas(db);
   try {
     initSchema(db);
@@ -141,16 +162,17 @@ export function initIndexDb(wikiDir: string): void {
  * 读连接（search/graph）：走池、复用。库必须已由 initIndexDb 建好。
  * 库不存在 → 抛错（视为"wiki 未正确创建/数据损坏"，不静默 lazy 建）。
  */
-export function getReadDb(wikiId: string, wikiDir: string): Database.Database {
-  let db = readPool.get(wikiId);
+export function getReadDb(wikiId: string, wikiDir: string, indexPath?: string): Database.Database {
+  const path = dbPath(wikiDir, indexPath);
+  const poolKey = `${wikiId}\u0000${path}`;
+  let db = readPool.get(poolKey);
   if (!db || !db.open) {
-    const path = dbPath(wikiDir);
     if (!existsSync(path)) {
       throw new Error(`index.db missing (wiki not created?): ${wikiId}`);
     }
-    db = new Database(path, { readonly: false });
-    applyPragmas(db);
-    readPool.set(wikiId, db);
+    db = new Database(path, { readonly: true, fileMustExist: true });
+    applyReadPragmas(db);
+    readPool.set(poolKey, db);
   }
   return db;
 }
@@ -159,8 +181,12 @@ export function getReadDb(wikiId: string, wikiDir: string): Database.Database {
  * 写连接（ingest/sync/rawWrite）：独立创建，事务内完成后 checkpoint + close，不进池。
  * `fn` 内的重建（FTS5 + graph_edge + page_meta + source）在同一事务里原子完成。
  */
-export function withWriteDb<T>(wikiDir: string, fn: (db: Database.Database) => T): T {
-  const path = dbPath(wikiDir);
+export function withWriteDb<T>(
+  wikiDir: string,
+  fn: (db: Database.Database) => T,
+  indexPath?: string,
+): T {
+  const path = dbPath(wikiDir, indexPath);
   if (!existsSync(path)) {
     throw new Error(`index.db missing (wiki not created?): ${wikiDir}`);
   }
@@ -177,7 +203,9 @@ export function withWriteDb<T>(wikiDir: string, fn: (db: Database.Database) => T
 
 /** wiki 删除：先关读连接（dispose 内部 checkpoint+close），调用方再 rmSync 目录。 */
 export function evictWikiDb(wikiId: string): void {
-  readPool.delete(wikiId);
+  for (const key of [...readPool.keys()]) {
+    if (key === wikiId || key.startsWith(`${wikiId}\u0000`)) readPool.delete(key);
+  }
 }
 
 /** 当前读池中的连接数（测试/可观测用）。 */
@@ -203,6 +231,28 @@ export interface SourceRow {
   last_modified_by: string | null;
   ingested_at: string | null;
   ingest_error: string | null;
+}
+
+export interface PageStorageRow {
+  page_id: string;
+  title: string | null;
+  type: string | null;
+  rel_path: string | null;
+  snippet: string | null;
+  storage_key: string | null;
+  storage_rel_path: string | null;
+}
+
+export function listPageStorage(db: Database.Database): PageStorageRow[] {
+  const columns = db.pragma("table_info(page_meta)") as Array<{ name: string }>;
+  const hasStorageKey = columns.some((column) => column.name === "storage_key");
+  const hasStorageRelPath = columns.some((column) => column.name === "storage_rel_path");
+  return db.prepare(
+    `SELECT page_id, title, type, rel_path, snippet,
+       ${hasStorageKey ? "storage_key" : "NULL"} AS storage_key,
+       ${hasStorageRelPath ? "storage_rel_path" : "NULL"} AS storage_rel_path
+     FROM page_meta ORDER BY page_id`,
+  ).all() as PageStorageRow[];
 }
 
 /** 计算内容 SHA-256（增量判断与 source 登记共用同一份 sha）。 */

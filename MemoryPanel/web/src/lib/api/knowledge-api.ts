@@ -76,6 +76,9 @@ export interface WikiDetail {
   service_url: string | null;
   summary: string | null;
   status: 'draft' | 'pending' | 'processing' | 'ready' | 'failed' | 'missing';
+  ingest_status: 'idle' | 'pending' | 'processing' | 'failed';
+  active_version: number | null;
+  building_version: number | null;
   internal_status?: string | null;
   sync_error: string | null;
   version: string;
@@ -173,6 +176,9 @@ export interface KnowledgeAssetItem {
   meta_status: string;
   status: string;
   internal_status?: string | null;
+  ingest_status?: string;
+  active_version?: number | null;
+  building_version?: number | null;
   sync_error?: string | null;
   ks_missing?: boolean;
   team_id?: string;
@@ -197,6 +203,9 @@ function assetItemToWiki(item: KnowledgeAssetItem): WikiDetail {
     summary: item.summary ?? null,
     status: (item.status as WikiDetail['status']) || 'draft',
     internal_status: item.internal_status ?? null,
+    ingest_status: (item.ingest_status as WikiDetail['ingest_status']) ?? 'idle',
+    active_version: item.active_version ?? null,
+    building_version: item.building_version ?? null,
     sync_error: item.sync_error ?? null,
     version: '1',
     owner_user_id: item.owner_user_id,
@@ -272,6 +281,22 @@ export function wikiStageLabel(status: WikiDetail['status'], internalStatus?: st
   return internalStatus ? (map[internalStatus] ?? internalStatus) : i18n.t('knowledgeApi.stage.processing');
 }
 
+export interface WikiVersionItem {
+  version: number;
+  version_key: string;
+  state: 'building' | 'published' | 'failed';
+  active: boolean;
+  base_version: number | null;
+  page_count: number;
+  summary: string | null;
+  size_bytes: number;
+  created_at: string;
+  published_at: string | null;
+  failed_at: string | null;
+  error: string | null;
+  reason: 'ingest' | 'manual' | 'legacy-migration';
+}
+
 export function wikiProgressPercent(status: WikiDetail['status'], internalStatus?: string | null): number {
   if (status === 'ready') return 100;
   if (status === 'failed') return 100;
@@ -334,8 +359,9 @@ export const knowledgeApi = {
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           await new Promise(r => setTimeout(r, attempt === 1 ? 800 : 2000));
           const detail = await knowledgeApi.wiki.get(wikiId);
-          const stage = wikiStageLabel(detail.status, detail.internal_status);
-          const done = wikiProgressPercent(detail.status, detail.internal_status);
+          const buildStatus = detail.ingest_status === 'idle' ? detail.status : detail.ingest_status;
+          const stage = wikiStageLabel(buildStatus as WikiDetail['status'], detail.internal_status);
+          const done = wikiProgressPercent(buildStatus as WikiDetail['status'], detail.internal_status);
           const pageHint = typeof detail.page_count === 'number' ? i18n.t('knowledgeApi.ingest.currentPage', { count: detail.page_count }) : '';
           callbacks.onProgress?.({
             type: 'file_done',
@@ -345,13 +371,13 @@ export const knowledgeApi = {
             ts: Date.now(),
           });
 
-          if (detail.status === 'ready') {
+          if (detail.ingest_status === 'idle' && detail.status === 'ready') {
             callbacks.onProgress?.({ type: 'batch_done', detail: i18n.t('knowledgeApi.ingest.complete'), done: 100, total: 100, ts: Date.now() });
             const count = detail.page_count ?? 0;
             callbacks.onComplete?.({ total: count, ingested: count });
             return;
           }
-          if (detail.status === 'failed') {
+          if (detail.ingest_status === 'failed' || detail.status === 'failed') {
             callbacks.onError?.(detail.sync_error || i18n.t('knowledgeApi.ingest.failed'));
             return;
           }
@@ -365,6 +391,22 @@ export const knowledgeApi = {
     /** 删除 */
     delete: (wikiId: string): Promise<void> =>
       panelPost('/wiki/delete', { wiki_ids: [wikiId] }),
+
+    versions: async (wikiId: string): Promise<WikiVersionItem[]> => {
+      const data = await panelPost<{ items: WikiVersionItem[] }>('/wiki/version/list', { wiki_id: wikiId });
+      return data.items ?? [];
+    },
+
+    rollback: (
+      wikiId: string,
+      targetVersion: number,
+      expectedActiveVersion: number,
+    ): Promise<{ wiki: WikiDetail; version: WikiVersionItem }> =>
+      panelPost('/wiki/version/rollback', {
+        wiki_id: wikiId,
+        target_version: targetVersion,
+        expected_active_version: expectedActiveVersion,
+      }),
 
     /** 图谱 */
     graph: (wikiId: string): Promise<GraphData> =>
@@ -496,7 +538,7 @@ export const knowledgeApi = {
 export async function pollWikiStatus(wikiId: string, maxAttempts = 30, intervalMs = 3000): Promise<WikiDetail> {
   for (let i = 0; i < maxAttempts; i++) {
     const detail = await knowledgeApi.wiki.get(wikiId);
-    if (detail.status === 'ready' || detail.status === 'failed') return detail;
+    if (detail.ingest_status === 'idle' || detail.ingest_status === 'failed' || detail.status === 'failed') return detail;
     await new Promise(r => setTimeout(r, intervalMs));
   }
   throw new Error(i18n.t('knowledgeApi.wikiIngestTimeout', { wikiId }));
