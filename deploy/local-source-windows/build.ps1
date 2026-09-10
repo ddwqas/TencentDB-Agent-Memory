@@ -21,7 +21,8 @@ if (-not $SkipInstall) {
     # Invoke-ProjectCommand $knowledgeDir 'pnpm.cmd' @('install', '--ignore-workspace')
     Invoke-ProjectCommand $knowledgeDir 'pnpm.cmd' @('install')
     Write-Info 'Installing MemoryPanel dependencies'
-    Invoke-ProjectCommand $panelDir 'pnpm.cmd' @('install', '--frozen-lockfile')
+    # Invoke-ProjectCommand $panelDir 'pnpm.cmd' @('install', '--frozen-lockfile')
+    Invoke-ProjectCommand $panelDir 'pnpm.cmd' @('install')
     Invoke-ProjectCommand $panelWebDir 'npm.cmd' @('ci', '--no-audit', '--no-fund')
 
     Write-Info 'Installing MemoryProxy dependencies'
