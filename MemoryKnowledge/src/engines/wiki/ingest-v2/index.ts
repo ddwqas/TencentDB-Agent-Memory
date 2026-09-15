@@ -28,6 +28,7 @@ import { slugify, dirForType } from "./slug.js";
 import { rebuildIndexFile } from "./index-builder.js";
 import { appendIngestLog, appendIngestLogBatch } from "./log-writer.js";
 import { createLogger } from "../../../logger.js";
+import { sourceFilename } from "./source-path.js";
 
 const log = createLogger("wiki-ingest");
 
@@ -118,7 +119,7 @@ export async function extractSource(
 ): Promise<Map<string, string>> {
   if (!existsSync(sourcePath)) throw new Error(`源文件不存在: ${sourcePath}`);
   const sourceText = readFileSync(sourcePath, "utf-8");
-  const sourceName = basename(sourcePath);
+  const sourceName = sourceFilename(projectPath, sourcePath);
   if (!sourceText.trim()) throw new Error(`源文件为空: ${sourceName}`);
 
   const llm = options.llm ?? createLlmClient(llmConfig);
@@ -296,7 +297,7 @@ export async function ingestSource(
   const existingPages = scanExistingPages(projectPath);
   const candidates = await extractSource(projectPath, sourcePath, llmConfig, existingPages, options);
   const llm = options.llm ?? createLlmClient(llmConfig);
-  const sourceName = basename(sourcePath);
+  const sourceName = sourceFilename(projectPath, sourcePath);
   const { written } = await commitCandidates(
     projectPath,
     [{ sourceFilename: sourceName, candidates }],

@@ -49,6 +49,10 @@ export default function WikiSourcesPanel() {
     setShowCreate,
     newName,
     setNewName,
+    newSourceType, setNewSourceType,
+    newRepoUrl, setNewRepoUrl,
+    newBranch, setNewBranch,
+    newDocsPath, setNewDocsPath,
     submitting,
     // allocate
     allocateTarget,
@@ -333,7 +337,7 @@ export default function WikiSourcesPanel() {
         >
           <Modal.Body>
             <Form>
-              <Form.Item label={t('wiki.create.name')} required extra={t('wiki.create.extra')}>
+              <Form.Item label={t('wiki.create.name')} required>
                 <Input
                   size="full"
                   value={newName}
@@ -341,13 +345,34 @@ export default function WikiSourcesPanel() {
                   placeholder={t('wiki.create.placeholder')}
                 />
               </Form.Item>
+              <Form.Item label={t('wiki.git.source')} required extra={t('wiki.git.sourceHint')}>
+                <Select
+                  value={newSourceType}
+                  onChange={(value) => setNewSourceType(value as 'upload' | 'git')}
+                  options={[
+                    { value: 'upload', text: t('wiki.git.uploadSource') },
+                    { value: 'git', text: t('wiki.git.repoSource') },
+                  ]}
+                />
+              </Form.Item>
+              {newSourceType === 'git' && <>
+                <Form.Item label={t('wiki.git.repoUrl')} required extra={t('wiki.git.credentialsHint')}>
+                  <Input size="full" value={newRepoUrl} onChange={setNewRepoUrl} placeholder="https://host/team/docs.git" />
+                </Form.Item>
+                <Form.Item label={t('wiki.git.branch')} required>
+                  <Input size="full" value={newBranch} onChange={setNewBranch} placeholder="main" />
+                </Form.Item>
+                <Form.Item label={t('wiki.git.docsPath')} extra={t('wiki.git.docsPathHint')}>
+                  <Input size="full" value={newDocsPath} onChange={setNewDocsPath} placeholder="docs" />
+                </Form.Item>
+              </>}
             </Form>
           </Modal.Body>
           <Modal.Footer>
             <Button
               type="primary"
               onClick={handleCreate}
-              disabled={submitting || !newName.trim()}
+              disabled={submitting || !newName.trim() || (newSourceType === 'git' && (!newRepoUrl.trim() || !newBranch.trim()))}
               loading={submitting}
             >
               {submitting ? t('wiki.create.submitting') : t('wiki.create.submit')}

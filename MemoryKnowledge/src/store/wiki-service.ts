@@ -11,13 +11,14 @@
  * - page/* 读取活动版本；写入/删除发布新的 Copy-on-Write 版本。
  */
 
-import { join, resolve, normalize, sep } from "node:path";
+import { dirname, join, resolve, normalize, sep } from "node:path";
 import {
   rmSync,
   mkdirSync,
   writeFileSync,
   readFileSync,
   existsSync,
+  renameSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 
@@ -38,14 +39,23 @@ import {
   listSources,
   deleteSources,
   sha256,
+  readSourceStates,
+  recordSourceIngestResult,
   type SourceStatus,
 } from "../engines/wiki/index-db.js";
 import { createWikiSourceManager, type WikiSourceManager } from "../engines/wiki/index.js";
 import {
   appendSourceHistory,
   sourceStateDbPath,
+  getActiveVersion,
+  listWikiVersions,
   type WikiVersionItem,
 } from "../engines/wiki/version-store.js";
+import {
+  normalizeWikiGitConfig, readWikiGitMetadata, writeWikiGitMetadata,
+  fetchWikiGitSnapshot, compareWikiGitFiles,
+  type WikiGitConfig, type WikiGitProvenance, type WikiGitFile,
+} from "../source-fetcher/wiki-git-source.js";
 
 export interface WikiBuildContext {
   wikiId: string;
@@ -58,6 +68,8 @@ export interface WikiBuildContext {
   ingestRunId: string;
   /** Monotonic generation allocated before the worker is queued. */
   version: number;
+  gitSource?: WikiGitProvenance;
+  sourceBaseline?: Map<string, { sha256: string; status: SourceStatus }>;
 }
 
 export interface WikiBuildResult {
@@ -111,6 +123,7 @@ export interface CreateWikiParams {
   name: string;
   source_type?: string;
   source_url?: string;
+  git?: WikiGitConfig;
   owner_user_id?: string;
   user_id?: string;
   agent_id?: string;
@@ -126,6 +139,7 @@ export interface RawFileEntry {
   size: number;
   /** 源文件生命周期状态（uploaded/ingested/failed，设计 003）。 */
   status: SourceStatus;
+  ingest_error?: string | null;
   /** 首次上传时间（此后不变）。 */
   created_at: string;
   /** 最近一次内容变更时间。 */
@@ -196,6 +210,7 @@ export type WriteOutcome<T> =
   | "processing"
   | "invalid_path"
   | "forbidden_path"
+  | "git_managed"
   | "too_large";
 
 const PAGE_WRITE_MAX_BYTES = 512 * 1024;
@@ -254,7 +269,24 @@ export class WikiService {
    * 幂等：同 (service_id, team_id, name) 返回已有行。
    */
   create(params: CreateWikiParams): { row: WikiRow; existed: boolean } {
-    const { row, existed } = this.store.createWiki(params);
+    if (params.source_type && params.source_type !== "upload" && params.source_type !== "git") {
+      throw new Error("source_type must be upload or git");
+    }
+    const gitConfig = params.source_type === "git"
+      ? normalizeWikiGitConfig(params.git ?? { repo_url: "", branch: "", docs_path: "" }) : null;
+    const { row, existed } = this.store.createWiki({
+      ...params,
+      source_type: gitConfig ? "git" : "upload",
+      source_url: gitConfig?.repo_url,
+      metadata_json: gitConfig ? JSON.stringify({ git: { ...gitConfig, commit_hash: null, last_sync: null } }) : "{}",
+    });
+    if (existed) {
+      const existingGit = row.source_type === "git" ? readWikiGitMetadata(row.metadata_json) : null;
+      if (!!gitConfig !== (row.source_type === "git") || (gitConfig && (
+        existingGit?.repo_url !== gitConfig.repo_url || existingGit.branch !== gitConfig.branch
+        || existingGit.docs_path !== gitConfig.docs_path
+      ))) throw new Error("a Wiki with this name already exists with a different source configuration");
+    }
     if (!existed) {
       const dir = this.dirFor(row.service_id, row.team_id, row.wiki_id);
       mkdirSync(join(dir, "raw", "sources"), { recursive: true });
@@ -291,18 +323,19 @@ export class WikiService {
     if (row.ingest_status === "pending" || row.ingest_status === "processing") {
       return { kind: "busy", status: row.ingest_status, step: row.internal_status };
     }
-    const nextVersion = row.version + 1;
+    // Git 无变化时不分配版本号；完成拉取和差异检查后再分配。
+    const nextVersion = row.source_type === "git" ? row.version : row.version + 1;
     this.store.updateWikiStatus(serviceId, wikiId, {
       status: row.active_version != null ? "ready" : "pending",
       ingest_status: "pending",
-      building_version: nextVersion,
-      internal_status: null,
+      building_version: row.source_type === "git" ? null : nextVersion,
+      internal_status: row.source_type === "git" ? "fetching" : null,
       sync_error: null,
       version: nextVersion,
     });
     this.audit({ ...row, version: nextVersion }, "ingest", "manual ingest", requesterUserId);
     const fresh = this.store.getWiki(serviceId, teamId, wikiId);
-    if (fresh) this.enqueueBuild(fresh);
+    if (fresh) this.enqueueBuild(fresh, requesterUserId);
     return fresh ? { kind: "ok", row: fresh } : { kind: "not_found" };
   }
 
@@ -341,7 +374,9 @@ export class WikiService {
     } catch (err) {
       return { kind: "invalid_version", message: err instanceof Error ? err.message : String(err) };
     }
+    const git = row.source_type === "git" ? readWikiGitMetadata(row.metadata_json) : null;
     this.store.updateWikiStatus(serviceId, wikiId, {
+      ...(git ? { metadata_json: writeWikiGitMetadata(row.metadata_json, { ...git, commit_hash: target.git_source?.commit_hash ?? null }) } : {}),
       status: "ready",
       ingest_status: "idle",
       active_version: targetVersion,
@@ -473,6 +508,7 @@ export class WikiService {
         filename: s.filename,
         size: s.size,
         status: s.status,
+        ingest_error: s.ingest_error,
         created_at: s.created_at,
         updated_at: s.updated_at,
         last_modified_by: s.last_modified_by,
@@ -555,6 +591,7 @@ export class WikiService {
   ): WriteOutcome<RawWriteResult> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
+    if (row.source_type === "git") return "git_managed";
     if (this.isBuildBusy(row) && row.internal_status === "publishing-manual-version") return "processing";
     const size = Buffer.byteLength(content, "utf-8");
     if (size > RAW_WRITE_MAX_BYTES) return "too_large";
@@ -586,6 +623,7 @@ export class WikiService {
   ): WriteOutcome<RawWriteManyItem[]> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
+    if (row.source_type === "git") return "git_managed";
     if (this.isBuildBusy(row) && row.internal_status === "publishing-manual-version") return "processing";
     if (files.length > RAW_WRITE_MAX) {
       throw new Error(`files exceeds max ${RAW_WRITE_MAX}`);
@@ -666,6 +704,7 @@ export class WikiService {
   ): Promise<WriteOutcome<RawRmResult>> {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return null;
+    if (row.source_type === "git") return "git_managed";
     if (this.isBuildBusy(row)) return "processing";
     if (filenames.length > RAW_RM_MAX) {
       throw new Error(`filenames exceeds max ${RAW_RM_MAX}`);
@@ -1100,11 +1139,65 @@ export class WikiService {
 
   // ═══════════════════════════════════════════════════════════════════
 
-  private enqueueBuild(row: WikiRow): void {
-    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, row.version));
+  /** 完整校验后的 Git 快照替换原文目录，并以生效版本状态登记源文件。 */
+  private replaceGitSources(root: string, files: WikiGitFile[], baseline: Map<string, { sha256: string; status: SourceStatus }>, userId?: string): void {
+    const rawRoot = resolve(root, "raw");
+    const sources = resolve(rawRoot, "sources");
+    const staging = resolve(rawRoot, `git-staging-${randomUUID()}`);
+    const backup = resolve(rawRoot, `git-backup-${randomUUID()}`);
+    // 所有递归删除和目录移动严格限制在该 Wiki 的 raw 目录内。
+    for (const target of [sources, staging, backup]) {
+      if (!target.startsWith(rawRoot + sep)) throw new Error("invalid Git snapshot directory");
+    }
+    mkdirSync(staging, { recursive: true });
+    let moved = false;
+    try {
+      const paths = new Set<string>();
+      for (const file of files) {
+        const target = resolve(staging, file.filename);
+        const key = process.platform === "win32" ? target.toLowerCase() : target;
+        if (!target.startsWith(staging + sep) || paths.has(key)) throw new Error(`conflicting Git document path: ${file.filename}`);
+        paths.add(key);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, file.content, "utf-8");
+      }
+      if (existsSync(sources)) { renameSync(sources, backup); moved = true; }
+      renameSync(staging, sources);
+      const sourceIndex = sourceStateDbPath(root);
+      initIndexDb(root, sourceIndex);
+      withWriteDb(root, (db) => {
+        const existing = new Map(listSources(db).map((file) => [file.filename, file]));
+        const names = new Set(files.map((file) => file.filename));
+        deleteSources(db, [...existing.keys()].filter((filename) => !names.has(filename)));
+        for (const file of files) {
+          upsertSource(db, { ...file, userId });
+          const old = baseline.get(file.filename);
+          const current = existing.get(file.filename);
+          if (old?.status === "ingested" && old.sha256 === file.sha256
+              && (current?.sha256 !== file.sha256 || current.status !== "ingested")) {
+            recordSourceIngestResult(db, { ...file, ok: true });
+          }
+        }
+      }, sourceIndex);
+      moved = false;
+    } catch (err) {
+      if (moved) {
+        rmSync(sources, { recursive: true, force: true });
+        renameSync(backup, sources);
+        moved = false;
+      }
+      throw err;
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+      if (!moved) rmSync(backup, { recursive: true, force: true });
+    }
   }
 
-  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string, version: number): Promise<void> {
+  private enqueueBuild(row: WikiRow, requesterUserId?: string): void {
+    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, row.version, requesterUserId));
+  }
+
+  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string, version: number, requesterUserId?: string): Promise<void> {
     // 入口检查点：pending 期间被删 → 跳过，不置 processing、不 ingest。
     if (this.isDeleted(serviceId, wikiId)) {
       this.finishCancelled(serviceId, teamId, wikiId);
@@ -1112,16 +1205,50 @@ export class WikiService {
     }
     const before = this.store.getWikiById(serviceId, wikiId);
     const hasActiveVersion = before?.active_version != null;
+    let gitMetadata = before?.source_type === "git" ? readWikiGitMetadata(before.metadata_json) : null;
+    let gitSource: WikiGitProvenance | undefined;
+    let sourceBaseline: Map<string, { sha256: string; status: SourceStatus }> | undefined;
+    let hasGitReport = false;
     this.store.updateWikiStatus(serviceId, wikiId, {
       status: hasActiveVersion ? "ready" : "processing",
       ingest_status: "processing",
-      building_version: version,
-      internal_status: "scanning",
+      building_version: before?.source_type === "git" ? null : version,
+      internal_status: before?.source_type === "git" ? "fetching" : "scanning",
       sync_error: null,
     });
     // 进度/终态 callback 共用同一代际，Panel 可拒绝 clear 后的迟到 progress
     const ingestRunId = randomUUID();
     try {
+      if (before?.source_type === "git") {
+        if (!gitMetadata) throw new Error("Git source configuration is missing");
+        const root = this.dirFor(serviceId, teamId, wikiId);
+        const active = getActiveVersion(root);
+        sourceBaseline = active
+          ? readSourceStates(getReadDb(wikiId, root, join(root, active.index_file)))
+          : new Map();
+        const publishedSource = listWikiVersions(root).find((item) => item.active)?.git_source;
+        const snapshot = await fetchWikiGitSnapshot(gitMetadata, join(root, "git-cache"), !!publishedSource);
+        if (this.isDeleted(serviceId, wikiId)) { this.finishCancelled(serviceId, teamId, wikiId); return; }
+        gitSource = snapshot.source;
+        gitMetadata = { ...gitMetadata, last_sync: compareWikiGitFiles(snapshot.files, sourceBaseline, gitSource.commit_hash) };
+        hasGitReport = true;
+        this.store.updateWikiStatus(serviceId, wikiId, {
+          internal_status: "scanning",
+          metadata_json: writeWikiGitMetadata(before.metadata_json, gitMetadata),
+        });
+        this.replaceGitSources(root, snapshot.files, sourceBaseline, requesterUserId ?? before.user_id ?? undefined);
+        if (gitMetadata.last_sync!.no_changes && active) {
+          this.store.updateWikiStatus(serviceId, wikiId, {
+            status: "ready", ingest_status: "idle", building_version: null, internal_status: null,
+            sync_error: null, last_sync_at: gitMetadata.last_sync!.checked_at,
+          });
+          this.logger?.info?.(`[wiki] ${wikiId} Git sync unchanged (${gitSource.commit_hash})`);
+          await this.onBuildComplete(this.store.getWikiById(serviceId, wikiId), "ready", null, ingestRunId, false);
+          return;
+        }
+        version = before.version + 1;
+        this.store.updateWikiStatus(serviceId, wikiId, { version, building_version: version });
+      }
       const result = await this.worker({
         wikiId,
         serviceId,
@@ -1136,13 +1263,23 @@ export class WikiService {
           }),
         ingestRunId,
         version,
+        gitSource,
+        sourceBaseline,
       });
       // 结束前检查点：processing 期间被删 → 跳过 ready/audit/回调，幂等收尾清理。
       if (this.isDeleted(serviceId, wikiId)) {
         this.finishCancelled(serviceId, teamId, wikiId);
         return;
       }
+      if (gitMetadata && gitSource) {
+        const failures = (this.rawLs(serviceId, teamId, wikiId) ?? [])
+          .filter((file) => file.status === "failed")
+          .map((file) => ({ filename: file.filename, error: file.ingest_error ?? "analysis failed" }));
+        gitMetadata = { ...gitMetadata, commit_hash: gitSource.commit_hash,
+          last_sync: { ...gitMetadata.last_sync!, failed: failures.length, failures } };
+      }
       this.store.updateWikiStatus(serviceId, wikiId, {
+        ...(gitMetadata ? { metadata_json: writeWikiGitMetadata(before!.metadata_json, gitMetadata) } : {}),
         status: "ready",
         ingest_status: "idle",
         active_version: version,
@@ -1167,6 +1304,13 @@ export class WikiService {
       if (this.isDeleted(serviceId, wikiId)) {
         this.finishCancelled(serviceId, teamId, wikiId);
         return;
+      }
+      if (gitMetadata && hasGitReport) {
+        const failures = (this.rawLs(serviceId, teamId, wikiId) ?? [])
+          .filter((file) => file.status === "failed")
+          .map((file) => ({ filename: file.filename, error: file.ingest_error ?? msg }));
+        gitMetadata.last_sync = { ...gitMetadata.last_sync!, failed: failures.length, failures };
+        this.store.updateWikiStatus(serviceId, wikiId, { metadata_json: writeWikiGitMetadata(before!.metadata_json, gitMetadata) });
       }
       this.store.updateWikiStatus(serviceId, wikiId, {
         status: hasActiveVersion ? "ready" : "failed",
@@ -1193,12 +1337,13 @@ export class WikiService {
     status: "ready" | "failed",
     errorMsg: string | null,
     ingestRunId?: string,
+    refreshSummary = true,
   ): Promise<void> {
     if (!row || !this.callbackConfig) return;
 
-    let summary: string | null = null;
+    let summary: string | null = refreshSummary ? null : row.summary;
 
-    if (status === "ready" && !errorMsg) {
+    if (status === "ready" && !errorMsg && refreshSummary) {
       // Generate summary via LLM (即使部分源失败也尝试生成——只要有页面就生成)
       try {
         const pages = this.pageLs(row.service_id, row.team_id, row.wiki_id) ?? [];

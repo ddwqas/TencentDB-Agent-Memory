@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import type { WikiGitProvenance } from "../../source-fetcher/wiki-git-source.js";
 
 export type WikiVersionState = "building" | "published" | "failed";
 
@@ -38,6 +39,8 @@ export interface WikiVersionManifest {
   failed_at: string | null;
   error: string | null;
   reason: "ingest" | "manual" | "legacy-migration";
+  /** 该版本分析使用的固定 Git 提交；旧版本与上传型 Wiki 可缺省。 */
+  git_source?: WikiGitProvenance;
 }
 
 export interface ActiveWikiVersion {
@@ -152,16 +155,24 @@ export function beginWikiBuild(
   root: string,
   version: number,
   reason: WikiVersionManifest["reason"] = "ingest",
+  gitSource?: WikiGitProvenance,
 ): WikiBuildGeneration {
   mkdirSync(join(root, "pages"), { recursive: true });
   const active = getActiveVersion(root);
+  const inheritedSource = active
+    ? readJson<WikiVersionManifest>(join(getVersionDir(root, active.version_key), MANIFEST_FILE))?.git_source
+    : undefined;
   const key = versionKey(version);
   const versionDir = getVersionDir(root, key);
   mkdirSync(join(versionDir, "pending", "sources"), { recursive: true });
 
   // Snapshot first. Uploads arriving after this point remain in root/raw and are
   // intentionally picked up by the next ingest batch.
-  copyTree(join(root, "raw", "sources"), join(versionDir, "pending", "sources"));
+  // Git 手动页面版本继承已发布资料，不能带入上一次同步失败留下的待处理原文。
+  const sourceDir = reason === "manual" && inheritedSource && active
+    ? join(getVersionDir(root, active.version_key), "pending", "sources")
+    : join(root, "raw", "sources");
+  copyTree(sourceDir, join(versionDir, "pending", "sources"));
   copyTree(join(versionDir, "pending", "sources"), join(versionDir, "raw", "sources"));
   if (active) {
     copyTree(join(getVersionDir(root, active.version_key), "wiki"), join(versionDir, "wiki"));
@@ -169,6 +180,7 @@ export function beginWikiBuild(
 
   const createdAt = new Date().toISOString();
   const manifest: WikiVersionManifest = {
+    ...((gitSource ?? inheritedSource) ? { git_source: gitSource ?? inheritedSource } : {}),
     schema_version: 1,
     version,
     version_key: key,

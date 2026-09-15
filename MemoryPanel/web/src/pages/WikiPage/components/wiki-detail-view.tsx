@@ -154,7 +154,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
               <Button type="text" onClick={openVersions}>
                 <History size={14} /> {t('wiki.version.history')}
               </Button>
-              <Button
+              {source.source_type !== 'git' && <Button
                 type="text"
                 onClick={() => {
                   setShowAddDoc(true);
@@ -162,7 +162,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
                 }}
               >
                 <AttachIcon size={14} /> {t('wiki.detail.add')}
-              </Button>
+              </Button>}
               <Button
                 type="primary"
                 onClick={() => handleIngest(selectedWikiId)}
@@ -173,7 +173,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
                   t('wiki.detail.processing')
                 ) : (
                   <>
-                    <StarIcon size={14} /> {t('wiki.action.ingest')}
+                    <StarIcon size={14} /> {t(source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
                   </>
                 )}
               </Button>
@@ -184,6 +184,36 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
           </div>
         </Card.Body>
       </Card>
+
+      {source.source_type === 'git' && source.git && (
+        <Card>
+          <Card.Body>
+            <div className="_wiki-git-source">
+              <strong>{t('wiki.git.repoSource')}</strong>
+              <span>{t('wiki.git.repoUrl')}：{source.git.repo_url}</span>
+              <span>{t('wiki.git.branch')}：{source.git.branch}</span>
+              <span>{t('wiki.git.docsPath')}：{source.git.docs_path || '/'}</span>
+              <span title={source.git.commit_hash ?? ''}>
+                {t('wiki.git.activeCommit')}：{source.git.commit_hash?.slice(0, 12) || t('wiki.git.notSynced')}
+              </span>
+              {source.git.last_sync && <>
+                <span title={source.git.last_sync.commit_hash}>
+                  {t('wiki.git.checkedCommit')}：{source.git.last_sync.commit_hash.slice(0, 12)}
+                  {' · '}{new Date(source.git.last_sync.checked_at).toLocaleString()}
+                </span>
+                <span>{t('wiki.git.stats', { ...source.git.last_sync })}</span>
+                {source.git.last_sync.no_changes && <Text theme="weak">{t('wiki.git.unchanged')}</Text>}
+                {source.git.last_sync.failures.length > 0 && (
+                  <div className="_wiki-git-failures">
+                    {source.git.last_sync.failures.map((file) => <div key={file.filename}>{file.filename}：{file.error}</div>)}
+                  </div>
+                )}
+              </>}
+              {source.sync_error && <Alert type="error">{source.sync_error}</Alert>}
+            </div>
+          </Card.Body>
+        </Card>
+      )}
 
       {(displayIngestState.active || displayIngestState.log.length > 0) &&
         displayIngestState.wiki === wikiName && (
@@ -394,6 +424,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
         </TabPanel>
         <TabPanel id="pages">
           <PagesTabContent
+            canDeleteRaw={source.source_type !== 'git'}
             pages={filteredPages}
             allPages={pages}
             types={types}
@@ -511,7 +542,12 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
                 </div>
                 {versions.map((version) => (
                   <div className="_wiki-version-row" key={version.version_key}>
-                    <span className="_wiki-version-number">v{version.version}</span>
+                    <span className="_wiki-version-number">
+                      v{version.version}
+                      {version.git_source && <small title={`${version.git_source.repo_url} · ${version.git_source.branch} · ${version.git_source.docs_path || '/'} · ${version.git_source.commit_hash}`}>
+                        {' · '}{version.git_source.commit_hash.slice(0, 12)}
+                      </small>}
+                    </span>
                     <span>
                       <Tag size="sm">
                         {version.active
@@ -546,7 +582,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
       )}
 
       {/* Add Doc Modal */}
-      {store.showAddDoc && (
+      {source.source_type !== 'git' && store.showAddDoc && (
         <Modal
           visible
           caption={t('wiki.detail.addDoc.caption', { name: wikiName })}

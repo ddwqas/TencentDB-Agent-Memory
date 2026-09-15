@@ -152,6 +152,7 @@ paths:
       description: |
         Background SerialQueue processes raw/sources/* via LLM to generate
         wiki pages + BM25 index. Returns immediately with status=pending.
+        Git-backed Wikis first fetch their configured branch and document directory.
       operationId: ingestWiki
       requestBody:
         required: true
@@ -335,6 +336,31 @@ paths:
           description: Invalid path or too many refs
         '404':
           description: Wiki not found
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+
+  /wiki/sync:
+    post:
+      tags: [LLM-Wiki]
+      summary: Manually sync and analyze Wiki documents
+      description: |
+        Git Wikis fetch a fixed commit and compare tracked Markdown paths and hashes
+        with the active Wiki version. Unchanged documents skip analysis; a no-op
+        does not allocate a Wiki version. Upload Wikis retain normal ingest behavior.
+        Poll /wiki/get for ingest_status and git.last_sync. Git source files cannot
+        be changed with raw/write or raw/rm (409).
+      operationId: syncWiki
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WikiIngestRequest'
+      responses:
+        '202':
+          description: Accepted; the active version remains available during processing
+        '409':
+          description: A sync or build is already running
         default:
           $ref: '#/components/responses/ErrorResponse'
 
@@ -769,6 +795,13 @@ components:
     WikiDetail:
       type: object
       properties:
+        source_type:
+          type: string
+          enum: [upload, git]
+        git:
+          allOf:
+            - $ref: '#/components/schemas/WikiGitState'
+          nullable: true
         wiki_id:
           type: string
         team_id:
@@ -812,8 +845,71 @@ components:
         - type: object
           required: [team_id, name]
           properties:
+            source_type:
+              type: string
+              enum: [upload, git]
+              default: upload
+              description: Fixed at creation; Git and manual uploads cannot be mixed
+            repo_url:
+              type: string
+              description: Required for Git; uses server Git credentials, not embedded HTTP credentials
+            branch:
+              type: string
+              description: Required for Git
+            docs_path:
+              type: string
+              default: ''
+              description: Repository-relative directory; empty means root. Recursively includes tracked .md files, up to 5 MiB each.
             name:
               type: string
+
+    WikiGitState:
+      type: object
+      properties:
+        repo_url:
+          type: string
+        branch:
+          type: string
+        docs_path:
+          type: string
+        commit_hash:
+          type: string
+          nullable: true
+          description: Full Git commit of the active Wiki version; restored on rollback
+        last_sync:
+          type: object
+          nullable: true
+          properties:
+            commit_hash:
+              type: string
+            checked_at:
+              type: string
+              format: date-time
+            total:
+              type: integer
+            added:
+              type: integer
+            modified:
+              type: integer
+            deleted:
+              type: integer
+            skipped:
+              type: integer
+            retried:
+              type: integer
+            failed:
+              type: integer
+            no_changes:
+              type: boolean
+            failures:
+              type: array
+              items:
+                type: object
+                properties:
+                  filename:
+                    type: string
+                  error:
+                    type: string
 
     WikiGetRequest:
       type: object

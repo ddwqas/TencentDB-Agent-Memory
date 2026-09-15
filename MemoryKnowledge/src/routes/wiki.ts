@@ -39,6 +39,7 @@ export interface WikiRouteDeps {
 
 /** Handle WriteOutcome error codes → HTTP response. Returns Response if handled, null otherwise. */
 function maybeWriteError(outcome: unknown): Response | null {
+  if (outcome === "git_managed") return Response.json(wrapError(409, "Git source documents are managed by repository sync"), { status: 409 });
   if (outcome === null) return Response.json(wrapError(404, "wiki not found"), { status: 404 });
   if (outcome === "processing") return Response.json(wrapError(409, "wiki is processing; cannot write/delete"), { status: 409 });
   if (outcome === "invalid_path") return Response.json(wrapError(400, "invalid path: traversal detected"), { status: 400 });
@@ -67,7 +68,7 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
     return c.json(wrapOk(toWikiDetail(row)));
   });
 
-  app.post("/ingest", async (c) => {
+  for (const path of ["/ingest", "/sync"]) app.post(path, async (c) => {
     const body = await c.req.json<Record<string, unknown>>();
     const serviceId = c.req.header("x-tdai-service-id");
     if (!isValidIdSegment(serviceId)) return c.json(wrapError(400, "x-tdai-service-id header is required"), 400);
@@ -80,7 +81,7 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
 
     // 空 wiki 禁止 ingest：无源文件时拒绝（避免静默成功 pageCount=0）
     const sources = wikiService.rawLs(serviceId, row.team_id, wikiId);
-    if (!sources || sources.length === 0) {
+    if (row.source_type !== "git" && (!sources || sources.length === 0)) {
       return c.json(wrapError(400, "wiki has no source files, upload before ingest"), 400);
     }
 
@@ -201,27 +202,44 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
     const name = body.name;
     if (typeof name !== "string" || !name) return c.json(wrapError(400, "name is required"), 400);
 
-    const { row, existed } = wikiService.create({
-      service_id: ids.service_id,
-      team_id: ids.team_id,
-      name,
-      owner_user_id: ids.user_id,
-      user_id: ids.user_id,
-      agent_id: ids.agent_id,
-      task_id: ids.task_id,
-    });
-
-    // Persist service_url (tools self-discovery base; resource selected via
-    // knowledge_id in request body, so the URL is service-level, not
-    // resource-scoped). publicBaseUrl already includes the API prefix; proxy
-    // appends `/tools/list` | `/tools/call` directly.
-    if (!existed && publicBaseUrl) {
-      const serviceUrl = publicBaseUrl;
-      const updated = wikiService.updateServiceUrl(ids.service_id, row.wiki_id, serviceUrl);
-      if (updated) return c.json(wrapOk(toWikiDetail(updated)), 201);
+    if (body.source_type !== undefined && body.source_type !== "upload" && body.source_type !== "git") {
+      return c.json(wrapError(400, "source_type must be upload or git"), 400);
     }
+    if (body.source_type === "git" && (typeof body.repo_url !== "string" || typeof body.branch !== "string"
+        || (body.docs_path !== undefined && typeof body.docs_path !== "string"))) {
+      return c.json(wrapError(400, "repo_url, branch and docs_path must be strings"), 400);
+    }
+    try {
+      const { row, existed } = wikiService.create({
+        service_id: ids.service_id,
+        team_id: ids.team_id,
+        name,
+        owner_user_id: ids.user_id,
+        user_id: ids.user_id,
+        agent_id: ids.agent_id,
+        task_id: ids.task_id,
+        source_type: body.source_type as "upload" | "git" | undefined,
+        git: body.source_type === "git" ? {
+          repo_url: body.repo_url as string,
+          branch: body.branch as string,
+          docs_path: (body.docs_path as string | undefined) ?? "",
+        } : undefined,
+      });
 
-    return c.json(wrapOk(toWikiDetail(row)), existed ? 200 : 201);
+      // Persist service_url (tools self-discovery base; resource selected via
+      // knowledge_id in request body, so the URL is service-level, not
+      // resource-scoped). publicBaseUrl already includes the API prefix; proxy
+      // appends `/tools/list` | `/tools/call` directly.
+      if (!existed && publicBaseUrl) {
+        const serviceUrl = publicBaseUrl;
+        const updated = wikiService.updateServiceUrl(ids.service_id, row.wiki_id, serviceUrl);
+        if (updated) return c.json(wrapOk(toWikiDetail(updated)), 201);
+      }
+
+      return c.json(wrapOk(toWikiDetail(row)), existed ? 200 : 201);
+    } catch (err) {
+      return c.json(wrapError(400, err instanceof Error ? err.message : String(err)), 400);
+    }
   });
 
   app.post("/list", async (c) => {

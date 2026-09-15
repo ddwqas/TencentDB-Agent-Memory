@@ -58,12 +58,24 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
     const name = str(body, 'name');
     if (!teamId) return respondControlError(c, 400, 'MISSING_TEAM_ID');
     if (!name) return respondControlError(c, 400, 'MISSING_NAME');
+    if (body.source_type !== undefined && body.source_type !== 'upload' && body.source_type !== 'git') {
+      return respondControlError(c, 400, 'INVALID_SOURCE_TYPE');
+    }
+    const gitSource = body.source_type === 'git';
+    const repoUrl = str(body, 'repo_url');
+    const branch = str(body, 'branch');
+    if (gitSource && (!repoUrl || !branch || (body.docs_path !== undefined && typeof body.docs_path !== 'string'))) {
+      return respondControlError(c, 400, 'INVALID_GIT_SOURCE');
+    }
     const gate = await requireTeamMember(deps, c, ctx, teamId);
     if ('error' in gate) return gate.error;
     const kc = deps.knowledgeClientFactory(ctx.instanceId);
     let detail;
     try {
-      detail = await kc.wikiCreate(teamId, name, gate.userId);
+      detail = await kc.wikiCreate(teamId, name, gate.userId, {
+        source_type: gitSource ? 'git' : 'upload',
+        ...(gitSource ? { repo_url: repoUrl!, branch: branch!, docs_path: str(body, 'docs_path') ?? '' } : {}),
+      });
     } catch (err) {
       return runKs(c, () => Promise.reject(err));
     }
@@ -82,7 +94,7 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
   });
 
   // W4 ingest — id-only（需 read 权限）+ 空 wiki 校验
-  api.post('/knowledge/wiki/ingest', mw, async (c) => {
+  for (const path of ['/knowledge/wiki/ingest', '/knowledge/wiki/sync']) api.post(path, mw, async (c) => {
     const ctx = buildCtx(c);
     const body = await readJson(c);
     const wikiId = str(body, 'wiki_id');
@@ -92,14 +104,15 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
     const kc = deps.knowledgeClientFactory(ctx.instanceId);
     // 空 wiki 禁止 ingest：先查 raw/ls，无源文件则拒绝
     try {
-      const listing = await kc.wikiRawLs(wikiId);
-      if (!listing.items || listing.items.length === 0) {
+      const detail = await kc.wikiGet(wikiId);
+      const listing = detail.source_type === 'git' ? null : await kc.wikiRawLs(wikiId);
+      if (listing && (!listing.items || listing.items.length === 0)) {
         return respondControlError(c, 400, 'WIKI_EMPTY_NO_SOURCES');
       }
     } catch {
       // raw/ls 查询失败不阻塞 ingest（KS 侧也有防御）
     }
-    return runKs(c, () => kc.wikiIngest(wikiId));
+    return runKs(c, () => path.endsWith('/sync') ? kc.wikiSync(wikiId, gate.userId) : kc.wikiIngest(wikiId));
   });
 
   // W3 get — id-only（需 read 权限）；聚合 Panel 内存 ingest progress（不新增接口）

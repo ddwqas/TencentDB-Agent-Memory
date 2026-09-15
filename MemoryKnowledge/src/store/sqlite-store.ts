@@ -315,6 +315,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
             name: input.name,
             sourceType: input.source_type ?? null,
             sourceUrl: input.source_url ?? null,
+            metadataJson: input.metadata_json ?? "{}",
             ownerUserId: input.owner_user_id ?? null,
             userId: input.user_id ?? null,
             agentId: input.agent_id ?? null,
@@ -448,6 +449,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
   /** id-only mutation — scoped by service_id so a foreign tenant cannot mutate. */
   updateWikiStatus(serviceId: string, wikiId: string, patch: WikiStatusPatch): void {
     const set: Record<string, unknown> = { updatedAt: nowIso() };
+    if (patch.metadata_json !== undefined) set.metadataJson = patch.metadata_json;
     if (patch.status !== undefined) set.status = patch.status;
     if (patch.ingest_status !== undefined) set.ingestStatus = patch.ingest_status;
     if (patch.active_version !== undefined) set.activeVersion = patch.active_version;

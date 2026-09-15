@@ -13,6 +13,7 @@ import { CoreUpstreamError } from '../../domain/errors.js';
 import type {
   KnowledgeClientPort,
   WikiDetail,
+  WikiCreateSource,
   WikiListResult,
   WikiIngestResult,
   WikiVersionItem,
@@ -164,8 +165,12 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
 
   // ═══════════════ Wiki · 资产层 ═══════════════
 
-  async wikiCreate(teamId: string, name: string, userId?: string): Promise<WikiDetail> {
-    return this.post('/v3/wiki/create', { team_id: teamId, name, user_id: userId });
+  async wikiCreate(teamId: string, name: string, userId?: string, source?: WikiCreateSource): Promise<WikiDetail> {
+    return this.post('/v3/wiki/create', { team_id: teamId, name, user_id: userId, ...source });
+  }
+
+  async wikiSync(wikiId: string, userId?: string): Promise<WikiIngestResult> {
+    return this.post('/v3/wiki/sync', { wiki_id: wikiId, user_id: userId });
   }
 
   async wikiGet(wikiId: string): Promise<WikiDetail> {

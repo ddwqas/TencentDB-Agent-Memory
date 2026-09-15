@@ -5,6 +5,7 @@
  */
 
 import type { CodeGraphRow, WikiRow } from "./store/index.js";
+import { readWikiGitMetadata } from "./source-fetcher/wiki-git-source.js";
 
 // ───────────────────────── IdFields ─────────────────────────
 
@@ -94,6 +95,8 @@ export function toExternalVersion(v: number): string {
 // ───────────────────────── WikiDetail ─────────────────────────
 
 export interface WikiDetail {
+  source_type: "upload" | "git";
+  git: import("./source-fetcher/wiki-git-source.js").WikiGitMetadata | null;
   wiki_id: string;
   team_id: string;
   name: string;
@@ -115,6 +118,8 @@ export interface WikiDetail {
 
 export function toWikiDetail(row: WikiRow): WikiDetail {
   return {
+    source_type: row.source_type === "git" ? "git" : "upload",
+    git: row.source_type === "git" ? readWikiGitMetadata(row.metadata_json) : null,
     wiki_id: row.wiki_id,
     team_id: row.team_id,
     name: row.name,

@@ -374,6 +374,8 @@ export async function requireKnowledgeRead(
 }
 
 export interface KnowledgeAssetListItem {
+  source_type?: 'upload' | 'git';
+  git?: import('../../../kernel/ports/knowledge-client-port.js').WikiGitState | null;
   knowledge_id: string;
   asset_type: string;
   name: string;
@@ -422,6 +424,8 @@ async function joinWikiKs(
     const ks = await kc.wikiGet(meta.asset_id);
     return {
       ...base,
+      source_type: ks.source_type,
+      git: ks.git,
       team_id: ks.team_id,
       status: ks.status,
       internal_status: ks.internal_status ?? null,

@@ -35,6 +35,10 @@ export function useWikiSources() {
   // Create wiki
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
+  const [newSourceType, setNewSourceType] = useState<'upload' | 'git'>('upload');
+  const [newRepoUrl, setNewRepoUrl] = useState('');
+  const [newBranch, setNewBranch] = useState('main');
+  const [newDocsPath, setNewDocsPath] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const uploadInFlightRef = useRef(false);
 
@@ -325,10 +329,17 @@ export function useWikiSources() {
     if (!newName.trim() || !activeTeamId) return;
     setSubmitting(true);
     try {
-      await knowledgeApi.wiki.create(activeTeamId, newName.trim());
+      await knowledgeApi.wiki.create(activeTeamId, newName.trim(), {
+        source_type: newSourceType,
+        ...(newSourceType === 'git' ? { repo_url: newRepoUrl.trim(), branch: newBranch.trim(), docs_path: newDocsPath.trim() } : {}),
+      });
       tea.notify.success(t('wiki.notify.created', { name: newName.trim() }));
       setShowCreate(false);
       setNewName('');
+      setNewSourceType('upload');
+      setNewRepoUrl('');
+      setNewBranch('main');
+      setNewDocsPath('');
       fetchSources();
     } catch (e: unknown) {
       tea.notify.error(e);
@@ -432,24 +443,34 @@ export function useWikiSources() {
           });
         },
         onComplete: (result) => {
+          const report = result.git?.last_sync;
+          const detail = report
+            ? report.no_changes ? t('wiki.git.unchanged') : t('wiki.git.completed', { ...report })
+            : t('wiki.ingest.done', { count: result.ingested });
           setIngestState((prev) => ({
             ...prev,
             active: false,
             done: 100,
             total: 100,
-            detail: t('wiki.ingest.done', { count: result.ingested }),
+            detail,
             currentFile: '',
+            log: report?.failures.map((file) => ({ file: file.filename, status: 'error' as const, error: file.error })) ?? prev.log,
           }));
-          tea.notify.success(t('wiki.notify.ingestComplete', { count: result.ingested }));
+          if (report?.failed) tea.notify.warning(detail);
+          else tea.notify.success(report ? detail : t('wiki.notify.ingestComplete', { count: result.ingested }));
           fetchSources();
           fetchDetail(wikiId);
+          setRawRefreshKey((key) => key + 1);
         },
         onError: (err) => {
           setIngestState((prev) => ({ ...prev, active: false, detail: t('wiki.ingest.error', { error: err }) }));
           tea.notify.error(err || t('wiki.notify.ingestFailed'));
+          fetchDetail(wikiId);
+          setRawRefreshKey((key) => key + 1);
         },
       },
       activeTeamId ?? '',
+      wiki?.source_type === 'git',
     );
     setIngestState((prev) =>
       prev.active
@@ -791,6 +812,14 @@ export function useWikiSources() {
     setShowCreate,
     newName,
     setNewName,
+    newSourceType,
+    setNewSourceType,
+    newRepoUrl,
+    setNewRepoUrl,
+    newBranch,
+    setNewBranch,
+    newDocsPath,
+    setNewDocsPath,
     submitting,
     setSubmitting,
     // allocate

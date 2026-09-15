@@ -131,6 +131,7 @@ export interface CreateWikiInput {
   name: string;
   source_type?: string;
   source_url?: string;
+  metadata_json?: string;
   owner_user_id?: string;
   user_id?: string;
   agent_id?: string;
@@ -147,6 +148,7 @@ export interface ImportWikiInput extends CreateWikiInput {
 }
 
 export interface WikiStatusPatch {
+  metadata_json?: string;
   status?: WikiStatus;
   ingest_status?: WikiIngestStatus;
   active_version?: number | null;

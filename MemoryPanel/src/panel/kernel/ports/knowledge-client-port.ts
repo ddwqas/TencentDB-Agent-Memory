@@ -15,7 +15,39 @@ import type { Readable } from 'node:stream';
 
 // ── Wiki ──
 
+export interface WikiGitConfig {
+  repo_url: string;
+  branch: string;
+  docs_path: string;
+}
+
+export interface WikiGitState extends WikiGitConfig {
+  commit_hash: string | null;
+  last_sync: {
+    commit_hash: string;
+    checked_at: string;
+    total: number;
+    added: number;
+    modified: number;
+    deleted: number;
+    skipped: number;
+    retried: number;
+    failed: number;
+    no_changes: boolean;
+    failures: Array<{ filename: string; error: string }>;
+  } | null;
+}
+
+export interface WikiCreateSource {
+  source_type: 'upload' | 'git';
+  repo_url?: string;
+  branch?: string;
+  docs_path?: string;
+}
+
 export interface WikiDetail {
+  source_type?: 'upload' | 'git';
+  git?: WikiGitState | null;
   wiki_id: string;
   team_id: string;
   name: string;
@@ -46,6 +78,7 @@ export interface WikiIngestResult {
 }
 
 export interface WikiVersionItem {
+  git_source?: WikiGitConfig & { commit_hash: string };
   schema_version: 1;
   version: number;
   version_key: string;
@@ -197,7 +230,8 @@ export interface KnowledgeClientPort {
   snapshotExport(kind: KnowledgeSnapshotKind, id: string): Promise<KnowledgeSnapshotDownload>;
   snapshotImport(kind: KnowledgeSnapshotKind, archivePath: string, options: KnowledgeSnapshotImportOptions): Promise<WikiDetail | CodeGraphDetail>;
   // Wiki — 资产层（create/list 带 IdFields；get/ingest/delete 仅资产 id 寻址）
-  wikiCreate(teamId: string, name: string, userId?: string): Promise<WikiDetail>;
+  wikiCreate(teamId: string, name: string, userId?: string, source?: WikiCreateSource): Promise<WikiDetail>;
+  wikiSync(wikiId: string, userId?: string): Promise<WikiIngestResult>;
   wikiGet(wikiId: string): Promise<WikiDetail>;
   wikiIngest(wikiId: string): Promise<WikiIngestResult>;
   wikiDelete(wikiIds: string[]): Promise<BatchDeleteResult>;

@@ -69,7 +69,39 @@ async function panelPost<T>(path: string, body?: unknown): Promise<T> {
 
 // ========================= Types（对接 Panel API） =========================
 
+export interface WikiGitConfig {
+  repo_url: string;
+  branch: string;
+  docs_path: string;
+}
+
+export interface WikiGitState extends WikiGitConfig {
+  commit_hash: string | null;
+  last_sync: {
+    commit_hash: string;
+    checked_at: string;
+    total: number;
+    added: number;
+    modified: number;
+    deleted: number;
+    skipped: number;
+    retried: number;
+    failed: number;
+    no_changes: boolean;
+    failures: Array<{ filename: string; error: string }>;
+  } | null;
+}
+
+export interface WikiCreateSource {
+  source_type: 'upload' | 'git';
+  repo_url?: string;
+  branch?: string;
+  docs_path?: string;
+}
+
 export interface WikiDetail {
+  source_type?: 'upload' | 'git';
+  git?: WikiGitState | null;
   wiki_id: string;
   team_id: string;
   name: string;
@@ -154,7 +186,7 @@ export interface IngestProgressEvent {
 
 export interface IngestStreamCallbacks {
   onProgress?: (event: IngestProgressEvent) => void;
-  onComplete?: (result: { total: number; ingested: number }) => void;
+  onComplete?: (result: { total: number; ingested: number; git?: WikiGitState | null }) => void;
   onError?: (error: string) => void;
 }
 
@@ -167,6 +199,8 @@ export interface WikiPage { path: string; title: string; type: string; tags?: st
 
 /** meta + KS join 后的列表项（team-assets） */
 export interface KnowledgeAssetItem {
+  source_type?: 'upload' | 'git';
+  git?: WikiGitState | null;
   knowledge_id: string;
   asset_type: string;
   name: string;
@@ -196,6 +230,8 @@ export interface KnowledgeAssetItem {
 
 function assetItemToWiki(item: KnowledgeAssetItem): WikiDetail {
   return {
+    source_type: item.source_type ?? 'upload',
+    git: item.git ?? null,
     wiki_id: item.knowledge_id,
     team_id: item.team_id ?? '',
     name: item.name,
@@ -274,6 +310,7 @@ export function wikiStageLabel(status: WikiDetail['status'], internalStatus?: st
   if (status === 'failed') return i18n.t('wiki.status.failed');
   if (status === 'draft') return i18n.t('wiki.status.draft');
   const map: Record<string, string> = {
+    fetching: i18n.t('wiki.git.fetching'),
     scanning: i18n.t('knowledgeApi.stage.scanning'),
     ingesting: i18n.t('knowledgeApi.stage.ingesting'),
     'rebuilding-index': i18n.t('knowledgeApi.stage.rebuildingIndex'),
@@ -282,6 +319,7 @@ export function wikiStageLabel(status: WikiDetail['status'], internalStatus?: st
 }
 
 export interface WikiVersionItem {
+  git_source?: WikiGitConfig & { commit_hash: string };
   version: number;
   version_key: string;
   state: 'building' | 'published' | 'failed';
@@ -321,8 +359,8 @@ export const knowledgeApi = {
 
   wiki: {
     /** 创建 wiki。返回 WikiDetail（含 wiki_id） */
-    create: (teamId: string, name: string): Promise<WikiDetail> =>
-      panelPost('/wiki/create', { team_id: teamId, name }),
+    create: (teamId: string, name: string, source?: WikiCreateSource): Promise<WikiDetail> =>
+      panelPost('/wiki/create', { team_id: teamId, name, ...source }),
 
     /** @deprecated 使用 teamAssets */
     list: async (teamId: string): Promise<WikiDetail[]> => {
@@ -344,12 +382,16 @@ export const knowledgeApi = {
     ingest: (wikiId: string): Promise<void> =>
       panelPost('/wiki/ingest', { wiki_id: wikiId }),
 
+    sync: (wikiId: string): Promise<void> =>
+      panelPost('/wiki/sync', { wiki_id: wikiId }),
+
     /** 触发 ingest 后轮询 wiki/get，用真实 status/internal_status 驱动进度展示。 */
-    ingestWithPolling: async (wikiId: string, callbacks: IngestStreamCallbacks, _teamId: string): Promise<void> => {
+    ingestWithPolling: async (wikiId: string, callbacks: IngestStreamCallbacks, _teamId: string, syncGit = false): Promise<void> => {
       try {
         callbacks.onProgress?.({ type: 'file_start', detail: i18n.t('knowledgeApi.ingest.triggering'), done: 0, total: 100, ts: Date.now() });
         try {
-          await knowledgeApi.wiki.ingest(wikiId);
+          if (syncGit) await knowledgeApi.wiki.sync(wikiId);
+          else await knowledgeApi.wiki.ingest(wikiId);
         } catch (err: unknown) {
           // 已经在 pending/processing 时，KS 会返回 409 busy；前端继续轮询现有任务。
           if (!(err instanceof KnowledgeApiError && err.code === 409)) throw err;
@@ -374,7 +416,7 @@ export const knowledgeApi = {
           if (detail.ingest_status === 'idle' && detail.status === 'ready') {
             callbacks.onProgress?.({ type: 'batch_done', detail: i18n.t('knowledgeApi.ingest.complete'), done: 100, total: 100, ts: Date.now() });
             const count = detail.page_count ?? 0;
-            callbacks.onComplete?.({ total: count, ingested: count });
+            callbacks.onComplete?.({ total: count, ingested: count, git: detail.git });
             return;
           }
           if (detail.ingest_status === 'failed' || detail.status === 'failed') {

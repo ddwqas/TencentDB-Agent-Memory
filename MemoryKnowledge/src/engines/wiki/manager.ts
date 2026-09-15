@@ -169,6 +169,9 @@ export interface IngestExecOptions {
   globalLlmLimit?: LimitFunction;
   /** Monotonic build number allocated by WikiService. */
   version?: number;
+  /** Git 同步固定来源与生效版本基线，避免失败同步或回滚导致漏分析。 */
+  gitSource?: import("../../source-fetcher/wiki-git-source.js").WikiGitProvenance;
+  sourceBaseline?: Map<string, { sha256: string; status: SourceStatus }>;
 }
 
 export interface WikiMutationResult<T> {
@@ -828,7 +831,7 @@ function findMdFiles(dir: string): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) files.push(...findMdFiles(full));
-    else if (entry.endsWith(".md") || entry.endsWith(".txt")) files.push(full);
+    else if (/\.(md|txt)$/i.test(entry)) files.push(full);
   }
   return files;
 }
@@ -1238,9 +1241,10 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     projectPath: string,
     candidatePath: string,
     candidateDb: DatabaseType.Database,
+    baselineIndex?: string,
   ): void {
     try {
-      const sourceIndex = ensureSourceState(projectPath);
+      const sourceIndex = baselineIndex ?? ensureSourceState(projectPath);
       const rows = listSources(getReadDb(name, projectPath, sourceIndex));
       for (const row of rows) {
         upsertSource(candidateDb, {
@@ -1274,9 +1278,11 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     const pages = scanWikiDir(build.versionDir);
     decorateStorageRefs(name, state.path, build.versionKey, pages);
     initIndexDb(build.versionDir);
+    const baseIndex = build.manifest.reason === "manual" && build.manifest.git_source
+      ? getActiveVersion(state.path)?.index_file : undefined;
     withWriteDb(build.versionDir, (db) => {
       writeIndex(db, pages);
-      seedCandidateSources(name, state.path, build.versionDir, db);
+      seedCandidateSources(name, state.path, build.versionDir, db, baseIndex ? join(state.path, baseIndex) : undefined);
       if (outcome) {
         for (const processed of outcome.processed) {
           const current = db.prepare("SELECT sha256 FROM source WHERE filename = ?").get(processed.filename) as
@@ -1316,7 +1322,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     const projectPath = state.path;
     const versions = listWikiVersions(projectPath);
     const version = opts?.version ?? Math.max(0, ...versions.map((item) => item.version)) + 1;
-    const build = beginWikiBuild(projectPath, version, "ingest");
+    const build = beginWikiBuild(projectPath, version, "ingest", opts?.gitSource);
     materializeActivePages(name, projectPath, build.versionDir);
     initWikiProject(build.versionDir);
 
@@ -1328,6 +1334,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     } catch {
       /* 库刚建 / 无 source 行 → 全部视为新增 */
     }
+    if (opts?.sourceBaseline) oldStates = opts.sourceBaseline;
     const t0 = Date.now();
     try {
       const outcome = await withSpan("wiki-ingest", async (span) => {

@@ -241,7 +241,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
         timeoutMs: effectiveLlm.timeoutMs,
         stream: effectiveLlm.stream ?? false,
       },
-      { onProgress, globalLlmLimit, version },
+      { onProgress, globalLlmLimit, version, gitSource: ctx.gitSource, sourceBaseline: ctx.sourceBaseline },
     );
     setInternalStatus("rebuilding-index");
 

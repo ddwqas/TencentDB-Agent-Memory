@@ -48,7 +48,7 @@ export function WikiActions({
   return (
     <div className="_asset-wiki-actions" onClick={(event) => event.stopPropagation()}>
       <Button type="weak" disabled={ingestBusy} onClick={() => onIngest(source.wiki_id)}>
-        <StarIcon size={14} /> {isCurrentIngesting ? t('wiki.action.ingestBusy') : ingestBusy ? t('wiki.action.queuing') : t('wiki.action.ingest')}
+        <StarIcon size={14} /> {isCurrentIngesting ? t('wiki.action.ingestBusy') : ingestBusy ? t('wiki.action.queuing') : t(source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
       </Button>
       {scopeTab === 'fixed' ? (
         <Button type="weak" onClick={() => onUnbind(source.wiki_id)}>
@@ -173,6 +173,7 @@ export function GraphTabContent({
 // Pages Tab (with resizable left panel)
 // ═══════════════════════════════════════════
 export function PagesTabContent({
+  canDeleteRaw = true,
   pages,
   allPages,
   types,
@@ -190,6 +191,7 @@ export function PagesTabContent({
   onDeletePage,
   onDeleteRaw,
 }: {
+  canDeleteRaw?: boolean;
   pages: WikiPage[];
   allPages: WikiPage[];
   types: string[];
@@ -271,6 +273,7 @@ export function PagesTabContent({
           refreshKey={rawRefreshKey}
           onRead={onReadRaw}
           onDelete={onDeleteRaw}
+          canDelete={canDeleteRaw}
         />
       </div>
       <ResizeHandle onMouseDown={onMouseDown} />
@@ -326,11 +329,13 @@ export function PagesTabContent({
 // Raw Files Section — 原始文档列表，默认展开
 // ═══════════════════════════════════════════
 export function RawFilesSection({
+  canDelete = true,
   wikiId,
   refreshKey,
   onRead,
   onDelete,
 }: {
+  canDelete?: boolean;
   wikiId: string;
   refreshKey?: number;
   onRead: (filename: string) => void;
@@ -390,14 +395,14 @@ export function RawFilesSection({
                 <span>{file.filename}</span>
                 <em>{(file.size / 1024).toFixed(1)}K</em>
               </button>
-              <Button
+              {canDelete && <Button
                 type="text"
                 className="_wiki-detail-page-delete"
                 onClick={() => void handleDelete(file.filename)}
                 tooltip={t('wiki.detail.rawFiles.deleteRaw')}
               >
                 {t('common.delete')}
-              </Button>
+              </Button>}
             </div>
           ))}
         </div>

@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync, existsSync, rmSync, readdirSync, statSync 
 import { join, basename, relative } from "node:path";
 import { parseFrontmatter, buildPage } from "./frontmatter.js";
 import { slugify } from "./slug.js";
+import { sourceFilename } from "./source-path.js";
 
 export interface DeleteSourceFilesResult {
   /** 被级联删除的 wiki page 绝对路径。 */
@@ -71,10 +72,10 @@ export async function deleteSourceFiles(
   sourceFullPaths: string[],
   _opts: DeleteSourceFilesOptions = {},
 ): Promise<DeleteSourceFilesResult> {
-  // 待删源的文件名集合（page 的 sources 里记的是文件名）。
+  // 引用使用相对路径，删除某章文档不能影响其他目录中的同名原文。
   const deletedNames = new Set<string>();
   for (const p of sourceFullPaths) {
-    deletedNames.add(basename(p));
+    deletedNames.add(sourceFilename(projectPath, p));
     try {
       if (existsSync(p)) rmSync(p, { force: true });
     } catch {
@@ -106,13 +107,8 @@ export async function deleteSourceFiles(
     if (remaining.length === sources.length) continue; // 本页不引用被删源
 
     if (remaining.length === 0) {
-      // 独占被删源 → 删页
-      try {
-        rmSync(pagePath, { force: true });
-        deletedWikiPaths.push(pagePath);
-      } catch {
-        /* ignore */
-      }
+      // 先保留页内容供引用清理读取别名，扫描完再统一删除。
+      deletedWikiPaths.push(pagePath);
     } else {
       // 共享 → 重写去掉被删源
       try {
@@ -125,7 +121,8 @@ export async function deleteSourceFiles(
     }
   }
 
-  return { deletedWikiPaths, rewrittenSourcePages };
+  const cascade = await cascadeDeleteWikiPagesWithRefs(projectPath, deletedWikiPaths);
+  return { deletedWikiPaths: cascade.deletedPaths, rewrittenSourcePages: rewrittenSourcePages + cascade.rewrittenFiles };
 }
 
 export interface CascadeDeletePagesResult {
