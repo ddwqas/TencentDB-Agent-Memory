@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { WikiGitProvenance } from "../../source-fetcher/wiki-git-source.js";
 
-export type WikiVersionState = "building" | "published" | "failed";
+export type WikiVersionState = "building" | "published" | "failed" | "paused";
 
 export interface WikiVersionManifest {
   schema_version: 1;
@@ -74,7 +74,7 @@ function readJson<T>(path: string): T | null {
   }
 }
 
-function atomicWriteJson(path: string, value: unknown): void {
+export function atomicWriteJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
@@ -156,6 +156,7 @@ export function beginWikiBuild(
   version: number,
   reason: WikiVersionManifest["reason"] = "ingest",
   gitSource?: WikiGitProvenance,
+  sourceSnapshot?: string,
 ): WikiBuildGeneration {
   mkdirSync(join(root, "pages"), { recursive: true });
   const active = getActiveVersion(root);
@@ -169,9 +170,9 @@ export function beginWikiBuild(
   // Snapshot first. Uploads arriving after this point remain in root/raw and are
   // intentionally picked up by the next ingest batch.
   // Git 手动页面版本继承已发布资料，不能带入上一次同步失败留下的待处理原文。
-  const sourceDir = reason === "manual" && inheritedSource && active
+  const sourceDir = sourceSnapshot ?? (reason === "manual" && inheritedSource && active
     ? join(getVersionDir(root, active.version_key), "pending", "sources")
-    : join(root, "raw", "sources");
+    : join(root, "raw", "sources"));
   copyTree(sourceDir, join(versionDir, "pending", "sources"));
   copyTree(join(versionDir, "pending", "sources"), join(versionDir, "raw", "sources"));
   if (active) {
@@ -237,13 +238,13 @@ export function publishWikiBuild(
   return manifest;
 }
 
-export function failWikiBuild(build: WikiBuildGeneration, error: unknown): WikiVersionManifest {
+export function failWikiBuild(build: WikiBuildGeneration, error: unknown, state: "failed" | "paused" = "failed"): WikiVersionManifest {
   const manifest: WikiVersionManifest = {
     ...build.manifest,
-    state: "failed",
+    state,
     size_bytes: directorySize(build.versionDir),
-    failed_at: new Date().toISOString(),
-    error: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
+    failed_at: state === "failed" ? new Date().toISOString() : null,
+    error: state === "paused" ? null : (error instanceof Error ? error.message : String(error)).slice(0, 2000),
   };
   atomicWriteJson(join(build.versionDir, MANIFEST_FILE), manifest);
   return manifest;
@@ -261,6 +262,15 @@ export function listWikiVersions(root: string): WikiVersionItem[] {
     versions.push({ ...manifest, active: active?.version_key === manifest.version_key });
   }
   return versions.sort((a, b) => b.version - a.version || b.created_at.localeCompare(a.created_at));
+}
+
+/** 服务重启后，将中断的分析版本标为暂停，保留其原文快照和检查点。 */
+export function pauseInterruptedWikiBuilds(root: string): void {
+  for (const item of listWikiVersions(root)) {
+    if (item.state !== "building" || item.reason !== "ingest") continue;
+    const { active: _active, ...manifest } = item;
+    atomicWriteJson(join(getVersionDir(root, item.version_key), MANIFEST_FILE), { ...manifest, state: "paused", error: null });
+  }
 }
 
 export function updateWikiVersionSummary(root: string, version: number, summary: string | null): void {

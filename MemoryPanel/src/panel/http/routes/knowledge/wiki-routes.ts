@@ -116,6 +116,17 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
   });
 
   // W3 get — id-only（需 read 权限）；聚合 Panel 内存 ingest progress（不新增接口）
+  for (const action of ['pause', 'resume'] as const) api.post(`/knowledge/wiki/${action}`, mw, async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const wikiId = str(body, 'wiki_id');
+    if (!wikiId) return respondControlError(c, 400, 'MISSING_WIKI_ID');
+    const gate = await requireKnowledgeRead(deps, c, ctx, wikiId, { action: 'write' });
+    if ('error' in gate) return gate.error;
+    const kc = deps.knowledgeClientFactory(ctx.instanceId);
+    return runKs(c, () => action === 'pause' ? kc.wikiPause(wikiId) : kc.wikiResume(wikiId, gate.userId));
+  });
+
   api.post('/knowledge/wiki/get', mw, async (c) => {
     const ctx = buildCtx(c);
     const body = await readJson(c);
@@ -131,7 +142,7 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
         status === 'processing' ? deps.ingestProgressStore.get(wikiId) : null;
       return {
         ...(detail as unknown as Record<string, unknown>),
-        progress: stored,
+        progress: detail.analysis ?? stored,
       };
     });
   });

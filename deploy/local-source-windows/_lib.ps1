@@ -224,6 +224,11 @@ function Get-TrackedProcess([string]$Name) {
     return $process
 }
 
+function Get-ServiceLogPath([string]$Name, [string]$Stream) {
+    $date = Get-Date -Format 'yyyy-MM-dd'
+    return Join-Path $script:LogDir "${Name}.${Stream}_${date}.log"
+}
+
 function Start-SourceProcess(
     [string]$Name,
     [string]$WorkingDirectory,
@@ -231,8 +236,15 @@ function Start-SourceProcess(
     [string[]]$Arguments,
     [hashtable]$Environment
 ) {
-    $stdout = Join-Path $script:LogDir "$Name.stdout.log"
-    $stderr = Join-Path $script:LogDir "$Name.stderr.log"
+    $stdout = Get-ServiceLogPath $Name 'stdout'
+    $stderr = Get-ServiceLogPath $Name 'stderr'
+    # Node 预加载器负责追加和跨日切换，不再使用会截断旧文件的重定向参数。
+    $logModule = Join-Path $script:RepoRoot 'deploy\shared\daily-log.mjs'
+    $logModuleUri = ([System.Uri]$logModule).AbsoluteUri
+    $Arguments = @('--import', $logModuleUri) + $Arguments
+    $Environment = @{} + $Environment
+    $Environment['TDAI_LOG_DIR'] = $script:LogDir
+    $Environment['TDAI_LOG_NAME'] = $Name
     $savedEnvironment = @{}
 
     foreach ($key in $Environment.Keys) {
@@ -248,8 +260,6 @@ function Start-SourceProcess(
             -FilePath $FilePath `
             -ArgumentList ($Arguments -join ' ') `
             -WorkingDirectory $WorkingDirectory `
-            -RedirectStandardOutput $stdout `
-            -RedirectStandardError $stderr `
             -WindowStyle Hidden `
             -PassThru
     } finally {
@@ -268,6 +278,7 @@ function Start-SourceProcess(
         startedUtcTicks = $process.StartTime.ToUniversalTime().Ticks
         stdout = $stdout
         stderr = $stderr
+        dailyLogs = $true
     } | ConvertTo-Json
     Write-Utf8File (Get-ProcessRecordPath $Name) $record
     return $process
@@ -283,8 +294,9 @@ function Wait-SourceService(
     while ((Get-Date) -lt $deadline) {
         if ($Process.HasExited) {
             $record = Read-ProcessRecord $Name
-            if ($record -and (Test-Path -LiteralPath $record.stderr)) {
-                Get-Content -LiteralPath $record.stderr -Tail 20
+            $errorLog = if ($record -and $record.dailyLogs) { Get-ServiceLogPath $Name 'stderr' } else { $record.stderr }
+            if ($errorLog -and (Test-Path -LiteralPath $errorLog)) {
+                Get-Content -LiteralPath $errorLog -Tail 20
             }
             throw "$Name exited with code $($Process.ExitCode)"
         }
@@ -299,7 +311,7 @@ function Wait-SourceService(
         }
         Start-Sleep -Milliseconds 500
     }
-    throw "$Name was not ready in ${TimeoutSeconds}s. Log: $(Join-Path $script:LogDir "$Name.stderr.log")"
+    throw "$Name was not ready in ${TimeoutSeconds}s. Log: $(Get-ServiceLogPath $Name 'stderr')"
 }
 
 function Stop-TrackedProcesses([switch]$Quiet) {

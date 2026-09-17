@@ -24,7 +24,7 @@ export type SyncStatus = "pending" | "processing" | "ready" | "failed";
  * code-graph 不使用 draft（其 create 即入队建图，初始 pending 是真 in-flight）。
  */
 export type WikiStatus = SyncStatus | "draft";
-export type WikiIngestStatus = "idle" | "pending" | "processing" | "failed";
+export type WikiIngestStatus = "idle" | "pending" | "processing" | "failed" | "paused";
 
 // ───────────────────────── Code-Graph ─────────────────────────
 
@@ -266,7 +266,7 @@ export interface IKnowledgeStore {
   listCodeGraphAudit(serviceId: string, codeGraphId: string, limit?: number, offset?: number): AuditLogRow[];
 
   // ── Restart recovery ──
-  /** Sweep all non-terminal (pending/processing) assets to failed, across all tenants. */
+  /** 重启恢复：Wiki 暂停等待继续，Code 构建标记失败。 */
   markInterruptedAsFailed(reason?: string): number;
   /** All ready code-graphs (with service_id) so module.ts can rebuild per-tenant dirs. */
   listSyncedCodeGraphs(): SyncedCodeGraphRef[];

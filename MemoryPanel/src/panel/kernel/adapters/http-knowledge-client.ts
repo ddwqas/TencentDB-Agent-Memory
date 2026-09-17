@@ -177,6 +177,14 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
     return this.post('/v3/wiki/get', { wiki_id: wikiId });
   }
 
+  async wikiPause(wikiId: string): Promise<WikiDetail> {
+    return this.post('/v3/wiki/pause', { wiki_id: wikiId });
+  }
+
+  async wikiResume(wikiId: string, userId?: string): Promise<WikiIngestResult> {
+    return this.post('/v3/wiki/resume', { wiki_id: wikiId, user_id: userId });
+  }
+
   async wikiIngest(wikiId: string): Promise<WikiIngestResult> {
     return this.post('/v3/wiki/ingest', { wiki_id: wikiId });
   }

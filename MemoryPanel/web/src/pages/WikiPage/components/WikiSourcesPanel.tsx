@@ -16,6 +16,7 @@ import { WikiOwnerLabel, WikiStatusBadge } from './wiki-ui';
 import { WikiActions } from './wiki-detail-components';
 import { useWikiSources } from '../hooks/useWikiSources';
 import { WikiDetailView } from './wiki-detail-view';
+import { WikiAnalysisProgress } from './WikiAnalysisProgress';
 import '@/components/asset/asset-card.css';
 import '../styles/wiki-sources-panel.css';
 
@@ -212,6 +213,7 @@ export default function WikiSourcesPanel() {
                       {t('wiki.card.pagesAndTime', { pages: source.page_count ?? 0, time: formatShortTime(source.last_sync_at) })}
                     </span>
                   </div>
+                  <WikiAnalysisProgress wiki={source} compact />
                   <div className="_asset-wiki-card-owner">
                     <UsergroupIcon size={12} />
                     {scopeTab === 'fixed' ? (
@@ -264,6 +266,12 @@ export default function WikiSourcesPanel() {
                   header: t('wiki.table.status'),
                   width: 100,
                   render: (source) => <WikiStatusBadge status={source.status} ingestStatus={source.ingest_status} />,
+                },
+                {
+                  key: 'analysis',
+                  header: t('wiki.analysis.progressTitle'),
+                  width: 300,
+                  render: (source) => <WikiAnalysisProgress wiki={source} compact />,
                 },
                 {
                   key: 'page_count',

@@ -3,6 +3,8 @@ node_modules/
 
 # Runtime workspace
 workspace/
+# 本地会话记录与隔离验证构建
+.record/
 
 # Environment variables
 .env

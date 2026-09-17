@@ -41,6 +41,8 @@ export function useWikiSources() {
   const [newDocsPath, setNewDocsPath] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const uploadInFlightRef = useRef(false);
+  const ingestPollRef = useRef<AbortController | null>(null);
+  useEffect(() => () => ingestPollRef.current?.abort(), []);
 
   // Allocate-to-agent
   const [allocateTarget, setAllocateTarget] = useState<{ wiki_id: string; name: string } | null>(
@@ -242,7 +244,7 @@ export function useWikiSources() {
 
   const fetchDetail = useCallback(async (wikiId: string) => {
     setGraphLoading(true);
-    // 两个子请求各自兜底，外层 catch 抓不到；用标志位感知任一失败后统一提示，
+    // 子请求各自兜底，外层 catch 抓不到；用标志位感知任一失败后统一提示，
     // 避免加载失败时详情页静默空白、用户无从判断。
     let hadError = false;
     try {
@@ -254,6 +256,12 @@ export function useWikiSources() {
         knowledgeApi.wiki.pages(wikiId).catch(() => {
           hadError = true;
           return [];
+        }),
+        knowledgeApi.wiki.get(wikiId).then((detail) => {
+          setSources((previous) => previous.map((source) => source.wiki_id === wikiId ? { ...source, ...detail } : source));
+        }).catch(() => {
+          hadError = true;
+          return null;
         }),
       ]);
       setGraphData(g);
@@ -294,7 +302,7 @@ export function useWikiSources() {
       );
       if (selectedWikiId && map.has(selectedWikiId)) {
         const d = map.get(selectedWikiId)!;
-        if (d.ingest_status === 'idle' || d.ingest_status === 'failed') void fetchDetail(selectedWikiId);
+        if (d.ingest_status === 'idle' || d.ingest_status === 'failed' || d.ingest_status === 'paused') void fetchDetail(selectedWikiId);
       }
     };
     void poll();
@@ -386,7 +394,15 @@ export function useWikiSources() {
   }, [hasManualIngestState, ingestState, runningWiki]);
   const ingestBusy = displayIngestState.active || !!runningWiki;
 
-  const handleIngest = async (wikiId: string) => {
+  const handlePause = async (wikiId: string) => {
+    try {
+      await knowledgeApi.wiki.pause(wikiId);
+      tea.notify.info(t('wiki.analysis.pausing'));
+      await fetchSources();
+    } catch (error) { tea.notify.error(error); }
+  };
+
+  const handleIngest = async (wikiId: string, resume = false) => {
     // 防御：同一时间只允许一个 Wiki 提取，避免并发 ingest 导致后端排队混乱。
     // 按钮已按 ingestBusy 禁用，这里再挡一层防止绕过。
     if (ingestBusy) {
@@ -395,6 +411,9 @@ export function useWikiSources() {
     }
     const wiki = sources.find((s) => s.wiki_id === wikiId);
     const name = wiki?.name ?? wikiId;
+    ingestPollRef.current?.abort();
+    const observer = new AbortController();
+    ingestPollRef.current = observer;
     setIngestState({
       active: true,
       wikiId,
@@ -410,6 +429,10 @@ export function useWikiSources() {
     await knowledgeApi.wiki.ingestWithPolling(
       wikiId,
       {
+        onPaused: () => {
+          setIngestState((prev) => ({ ...prev, active: false, currentFile: '', detail: t('wiki.analysis.pausedHint') }));
+          fetchSources();
+        },
         onProgress: (ev) => {
           setIngestState((prev) => {
             const next = { ...prev };
@@ -471,6 +494,8 @@ export function useWikiSources() {
       },
       activeTeamId ?? '',
       wiki?.source_type === 'git',
+      resume,
+      observer.signal,
     );
     setIngestState((prev) =>
       prev.active
@@ -874,6 +899,7 @@ export function useWikiSources() {
     handleUnbindWiki,
     handleCreate,
     handleIngest,
+    handlePause,
     handleDelete,
     openDetail,
     handleReadPage,

@@ -28,6 +28,7 @@ import { createLogger } from "./logger.js";
 import type { LlmConfig } from "./config.js";
 import { getGlobalLlmConcurrency } from "./config.js";
 import { buildProgressFn } from "./callback.js";
+import { pauseInterruptedWikiBuilds } from "./engines/wiki/version-store.js";
 import { AutoSyncScheduler, resolveAutoSyncConfig, type AutoSyncConfig } from "./store/auto-sync-scheduler.js";
 
 const log = createLogger("knowledge-module");
@@ -241,7 +242,9 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
         timeoutMs: effectiveLlm.timeoutMs,
         stream: effectiveLlm.stream ?? false,
       },
-      { onProgress, globalLlmLimit, version, gitSource: ctx.gitSource, sourceBaseline: ctx.sourceBaseline },
+      { onProgress, saveProgress: ctx.setProgress,
+        globalLlmLimit, version, gitSource: ctx.gitSource, sourceBaseline: ctx.sourceBaseline,
+        signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot },
     );
     setInternalStatus("rebuilding-index");
 
@@ -282,7 +285,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
   // Restart recovery: mark interrupted tasks as failed
   const interrupted = store.markInterruptedAsFailed();
   if (interrupted > 0) {
-    log.info(`marked ${interrupted} interrupted tasks as failed`);
+    log.info(`recovered ${interrupted} interrupted tasks (Wiki analysis paused; Code builds marked failed)`);
   }
 
   // Background restore of synced instances (non-blocking)
@@ -319,6 +322,14 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
       for (const row of allSyncedWikis) {
         const dir = join(dataDir, row.service_id, row.team_id, row.wiki_id);
         try {
+          if (row.ingest_status === "paused") {
+            pauseInterruptedWikiBuilds(dir);
+            if (row.active_version === null) {
+              wikiMgr.init({ name: row.wiki_id, path: dir });
+              log.info(`[wiki] ${row.wiki_id} analysis paused; waiting for manual resume`);
+              continue;
+            }
+          }
           const restoredState = wikiMgr.restore({ name: row.wiki_id, path: dir });
           const pages = wikiMgr.getPages(row.wiki_id);
           if (restoredState.activeVersion != null) {

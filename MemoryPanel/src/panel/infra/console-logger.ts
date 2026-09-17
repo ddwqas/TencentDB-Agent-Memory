@@ -7,18 +7,10 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
   error: 40,
 };
 
-const COLORS: Record<LogLevel, string> = {
-  debug: '\x1b[90m', // gray
-  info: '\x1b[36m', // cyan
-  warn: '\x1b[33m', // yellow
-  error: '\x1b[31m', // red
-};
-const RESET = '\x1b[0m';
-
 export interface ConsoleLoggerOptions {
   /** 最低输出级别，低于此级别的日志被丢弃。 */
   level: LogLevel;
-  /** json：每行一个 JSON（适合采集）；pretty：人类可读（适合本地开发）。 */
+  /** json：每行一个 JSON；pretty：时间、级别、模块、消息和 JSON 字段。 */
   format: 'json' | 'pretty';
   /** 固定绑定字段（child 累加）。 */
   bindings?: LogFields;
@@ -26,7 +18,7 @@ export interface ConsoleLoggerOptions {
 
 /**
  * 零依赖的结构化 console 日志实现。
- * - error 走 stderr，其余走 stdout；
+ * - warn/error 走 stderr，其余走 stdout，与知识服务一致；
  * - format=json 时每行一个 JSON 对象，便于被日志平台采集；
  * - child() 累加绑定字段，实现 reqId 串联。
  */
@@ -61,20 +53,16 @@ export class ConsoleLogger implements Logger {
     if (LEVEL_WEIGHT[level] < this.minWeight) return;
     const time = formatLocalLogTime();
     const merged: LogFields = { ...this.opts.bindings, ...fields };
-    const stream = level === 'error' ? process.stderr : process.stdout;
+    const stream = level === 'warn' || level === 'error' ? process.stderr : process.stdout;
 
     if (this.opts.format === 'json') {
       stream.write(`${JSON.stringify({ time, level, msg, ...merged })}\n`);
       return;
     }
 
-    const head = `${COLORS[level]}${level.toUpperCase().padEnd(5)}${RESET}`;
-    const tail =
-      Object.keys(merged).length > 0
-        ? ` ${Object.entries(merged)
-            .map(([k, v]) => `${k}=${fmtValue(v)}`)
-            .join(' ')}`
-        : '';
+    // pretty 同样会落盘，不写入终端颜色控制符；字段保留为可解析的 JSON。
+    const head = `[${level.toUpperCase().padEnd(5)}] [panel]`;
+    const tail = Object.keys(merged).length > 0 ? ` ${JSON.stringify(merged)}` : '';
     stream.write(`${time} ${head} ${msg}${tail}\n`);
   }
 }
@@ -89,10 +77,4 @@ function formatLocalLogTime(): string {
   const second = String(date.getSeconds()).padStart(2, '0');
   const millisecond = String(date.getMilliseconds()).padStart(3, '0');
   return `${year}-${month}-${day} ${hour}:${minute}:${second}.${millisecond}`;
-}
-
-function fmtValue(v: unknown): string {
-  if (v === null || v === undefined) return String(v);
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
 }

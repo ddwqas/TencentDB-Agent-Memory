@@ -14,12 +14,13 @@ $ports = @{
 
 $rows = foreach ($name in $script:ServiceNames) {
     $process = Get-TrackedProcess $name
+    $record = Read-ProcessRecord $name
     [pscustomobject]@{
         Service = $name
         Status = if ($process) { 'running' } else { 'stopped' }
         PID = if ($process) { $process.Id } else { $null }
         Port = $ports[$name]
+        Log = if ($record -and $record.dailyLogs) { Get-ServiceLogPath $name 'stdout' } elseif ($record) { $record.stdout } else { Get-ServiceLogPath $name 'stdout' }
     }
 }
 $rows | Format-Table -AutoSize
-

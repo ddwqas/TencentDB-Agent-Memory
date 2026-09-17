@@ -608,17 +608,22 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       .set({ status: "failed", syncError: reason, updatedAt: ts })
       .where(sql`status IN ('pending','processing')`)
       .run();
+    const manual = this.db.update(knowledgeWiki)
+      .set({ status: sql`CASE WHEN active_version IS NULL THEN 'failed' ELSE 'ready' END`,
+        ingestStatus: "failed", buildingVersion: null, internalStatus: null, syncError: reason, updatedAt: ts })
+      .where(sql`ingest_status IN ('pending','processing') AND internal_status = 'publishing-manual-version'`)
+      .run();
     const bActive = this.db
       .update(knowledgeWiki)
-      .set({ status: "ready", ingestStatus: "failed", buildingVersion: null, internalStatus: null, syncError: reason, updatedAt: ts })
+      .set({ status: "ready", ingestStatus: "paused", buildingVersion: null, internalStatus: null, syncError: null, updatedAt: ts })
       .where(sql`ingest_status IN ('pending','processing') AND active_version IS NOT NULL`)
       .run();
     const bInitial = this.db
       .update(knowledgeWiki)
-      .set({ status: "failed", ingestStatus: "failed", buildingVersion: null, internalStatus: null, syncError: reason, updatedAt: ts })
+      .set({ status: "draft", ingestStatus: "paused", buildingVersion: null, internalStatus: null, syncError: null, updatedAt: ts })
       .where(sql`(ingest_status IN ('pending','processing') OR status IN ('pending','processing')) AND active_version IS NULL`)
       .run();
-    return a.changes + bActive.changes + bInitial.changes;
+    return a.changes + manual.changes + bActive.changes + bInitial.changes;
   }
 
   /** All ready code-graphs (with service_id) so module.ts can rebuild per-tenant dirs. */
@@ -651,7 +656,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       })
       .from(knowledgeWiki)
       .where(
-        and(sql`${knowledgeWiki.status} <> 'draft'`, isNull(knowledgeWiki.deletedAt)),
+        and(sql`(${knowledgeWiki.status} <> 'draft' OR ${knowledgeWiki.ingestStatus} = 'paused')`, isNull(knowledgeWiki.deletedAt)),
       )
       .all();
     return rows.map((row) => ({

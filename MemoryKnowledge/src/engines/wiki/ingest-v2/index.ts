@@ -98,6 +98,7 @@ export interface CommitResult {
 }
 
 export interface CommitOptions extends MergeOptions {
+  signal?: AbortSignal;
   /** 全局 LLM 信号量（mergePage 内 LLM 合并调用纳入限流） */
   globalLlmLimit?: LimitFunction;
   /** 跳过 batch log 写入（薄封装调用时由外层自行写单源日志） */
@@ -216,7 +217,7 @@ export async function commitCandidates(
   llm: LlmClient | undefined,
   options?: CommitOptions,
 ): Promise<CommitResult> {
-  const { globalLlmLimit, skipLog, ...mergeOpts } = options ?? {};
+  const { globalLlmLimit, skipLog, signal, ...mergeOpts } = options ?? {};
 
   const byPage = new Map<string, Array<{ source: string; content: string }>>();
   for (const { sourceFilename, candidates } of allCandidates) {
@@ -234,6 +235,7 @@ export async function commitCandidates(
     let existing = existsSync(fullPath) ? readFileSync(fullPath, "utf-8") : null;
 
     for (const entry of entries) {
+      signal?.throwIfAborted();
       if (!llm) {
         mergeErrors.push({
           relPath,
@@ -246,6 +248,7 @@ export async function commitCandidates(
         const decision = globalLlmLimit
           ? await globalLlmLimit(() => mergePage(existing, entry.content, llm, mergeOpts))
           : await mergePage(existing, entry.content, llm, mergeOpts);
+        signal?.throwIfAborted();
         if (decision.action === "skip") {
           log.debug("跳过页（locked）", { relPath, source: entry.source });
           continue;
@@ -256,6 +259,7 @@ export async function commitCandidates(
         if (!written.includes(relPath)) written.push(relPath);
         log.debug("写盘", { relPath, source: entry.source, bytes: decision.content.length });
       } catch (err) {
+        signal?.throwIfAborted();
         mergeErrors.push({ relPath, source: entry.source, error: String(err) });
         log.error("页面合并失败", { relPath, source: entry.source, error: String(err) });
       }

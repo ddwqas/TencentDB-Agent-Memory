@@ -339,6 +339,45 @@ paths:
         default:
           $ref: '#/components/responses/ErrorResponse'
 
+  /wiki/pause:
+    post:
+      tags: [LLM-Wiki]
+      summary: Pause AI analysis and retain completed checkpoints
+      operationId: pauseWiki
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WikiIngestRequest'
+      responses:
+        '202':
+          description: Pausing or already paused; poll wiki/get for ingest_status=paused
+        '409':
+          description: No running AI analysis
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+
+  /wiki/resume:
+    post:
+      tags: [LLM-Wiki]
+      summary: Resume AI analysis from persisted checkpoints
+      description: Uses the interrupted Git snapshot without fetching a newer commit. Completed responses are reused for the same knowledge baseline and model configuration.
+      operationId: resumeWiki
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WikiIngestRequest'
+      responses:
+        '202':
+          description: Accepted
+        '409':
+          description: An analysis is already running
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+
   /wiki/sync:
     post:
       tags: [LLM-Wiki]
@@ -795,6 +834,38 @@ components:
     WikiDetail:
       type: object
       properties:
+        ingest_status:
+          type: string
+          enum: [idle, pending, processing, failed, paused]
+        analysis:
+          type: object
+          nullable: true
+          description: Persistent AI progress, available from wiki/get across process restarts
+          properties:
+            phase:
+              type: string
+              enum: [extracting, merging, indexing]
+            total:
+              type: integer
+            completed:
+              type: integer
+            failed:
+              type: integer
+            skipped:
+              type: integer
+            cached:
+              type: integer
+            current_files:
+              type: array
+              items:
+                type: string
+            percent:
+              type: integer
+            version:
+              type: integer
+            updated_at:
+              type: string
+              format: date-time
         source_type:
           type: string
           enum: [upload, git]

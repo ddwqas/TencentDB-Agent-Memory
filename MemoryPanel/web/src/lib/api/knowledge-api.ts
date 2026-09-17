@@ -99,7 +99,22 @@ export interface WikiCreateSource {
   docs_path?: string;
 }
 
+export interface WikiAnalysisProgress {
+  phase: 'extracting' | 'merging' | 'indexing';
+  total: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  cached?: number;
+  current_files?: string[];
+  percent: number;
+  version?: number;
+  updated_at?: string;
+}
+
 export interface WikiDetail {
+  analysis?: WikiAnalysisProgress | null;
+  progress?: WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
   git?: WikiGitState | null;
   wiki_id: string;
@@ -108,7 +123,7 @@ export interface WikiDetail {
   service_url: string | null;
   summary: string | null;
   status: 'draft' | 'pending' | 'processing' | 'ready' | 'failed' | 'missing';
-  ingest_status: 'idle' | 'pending' | 'processing' | 'failed';
+  ingest_status: 'idle' | 'pending' | 'processing' | 'failed' | 'paused';
   active_version: number | null;
   building_version: number | null;
   internal_status?: string | null;
@@ -185,6 +200,7 @@ export interface IngestProgressEvent {
 }
 
 export interface IngestStreamCallbacks {
+  onPaused?: () => void;
   onProgress?: (event: IngestProgressEvent) => void;
   onComplete?: (result: { total: number; ingested: number; git?: WikiGitState | null }) => void;
   onError?: (error: string) => void;
@@ -199,6 +215,7 @@ export interface WikiPage { path: string; title: string; type: string; tags?: st
 
 /** meta + KS join 后的列表项（team-assets） */
 export interface KnowledgeAssetItem {
+  analysis?: WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
   git?: WikiGitState | null;
   knowledge_id: string;
@@ -230,6 +247,7 @@ export interface KnowledgeAssetItem {
 
 function assetItemToWiki(item: KnowledgeAssetItem): WikiDetail {
   return {
+    analysis: item.analysis,
     source_type: item.source_type ?? 'upload',
     git: item.git ?? null,
     wiki_id: item.knowledge_id,
@@ -310,6 +328,7 @@ export function wikiStageLabel(status: WikiDetail['status'], internalStatus?: st
   if (status === 'failed') return i18n.t('wiki.status.failed');
   if (status === 'draft') return i18n.t('wiki.status.draft');
   const map: Record<string, string> = {
+    pausing: i18n.t('wiki.analysis.pausing'),
     fetching: i18n.t('wiki.git.fetching'),
     scanning: i18n.t('knowledgeApi.stage.scanning'),
     ingesting: i18n.t('knowledgeApi.stage.ingesting'),
@@ -322,7 +341,7 @@ export interface WikiVersionItem {
   git_source?: WikiGitConfig & { commit_hash: string };
   version: number;
   version_key: string;
-  state: 'building' | 'published' | 'failed';
+  state: 'building' | 'published' | 'failed' | 'paused';
   active: boolean;
   base_version: number | null;
   page_count: number;
@@ -385,29 +404,38 @@ export const knowledgeApi = {
     sync: (wikiId: string): Promise<void> =>
       panelPost('/wiki/sync', { wiki_id: wikiId }),
 
+    pause: (wikiId: string): Promise<void> => panelPost('/wiki/pause', { wiki_id: wikiId }),
+    resume: (wikiId: string): Promise<void> => panelPost('/wiki/resume', { wiki_id: wikiId }),
+
     /** 触发 ingest 后轮询 wiki/get，用真实 status/internal_status 驱动进度展示。 */
-    ingestWithPolling: async (wikiId: string, callbacks: IngestStreamCallbacks, _teamId: string, syncGit = false): Promise<void> => {
+    ingestWithPolling: async (wikiId: string, callbacks: IngestStreamCallbacks, _teamId: string, syncGit = false, resume = false, signal?: AbortSignal): Promise<void> => {
       try {
         callbacks.onProgress?.({ type: 'file_start', detail: i18n.t('knowledgeApi.ingest.triggering'), done: 0, total: 100, ts: Date.now() });
         try {
-          if (syncGit) await knowledgeApi.wiki.sync(wikiId);
+          if (resume) await knowledgeApi.wiki.resume(wikiId);
+          else if (syncGit) await knowledgeApi.wiki.sync(wikiId);
           else await knowledgeApi.wiki.ingest(wikiId);
         } catch (err: unknown) {
           // 已经在 pending/processing 时，KS 会返回 409 busy；前端继续轮询现有任务。
           if (!(err instanceof KnowledgeApiError && err.code === 409)) throw err;
         }
 
-        const maxAttempts = 300; // 最多约 10 分钟；每次都实际查询 wiki/get。
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        // 大型 Wiki 分析可能持续数小时，页面观察不应在十分钟后误报分析失败。
+        for (let attempt = 1; ; attempt++) {
           await new Promise(r => setTimeout(r, attempt === 1 ? 800 : 2000));
+          if (signal?.aborted) return;
           const detail = await knowledgeApi.wiki.get(wikiId);
+          if (signal?.aborted) return;
+          if (detail.ingest_status === 'paused') { callbacks.onPaused?.(); return; }
           const buildStatus = detail.ingest_status === 'idle' ? detail.status : detail.ingest_status;
           const stage = wikiStageLabel(buildStatus as WikiDetail['status'], detail.internal_status);
-          const done = wikiProgressPercent(buildStatus as WikiDetail['status'], detail.internal_status);
+          const progress = detail.analysis ?? detail.progress;
+          const done = progress?.percent ?? wikiProgressPercent(buildStatus as WikiDetail['status'], detail.internal_status);
           const pageHint = typeof detail.page_count === 'number' ? i18n.t('knowledgeApi.ingest.currentPage', { count: detail.page_count }) : '';
           callbacks.onProgress?.({
             type: 'file_done',
-            detail: i18n.t('knowledgeApi.ingest.check', { attempt, stage, pageHint }),
+            detail: progress ? i18n.t('wiki.analysis.progress', { ...progress, cached: progress.cached ?? 0 })
+              : i18n.t('knowledgeApi.ingest.check', { attempt, stage, pageHint }),
             done,
             total: 100,
             ts: Date.now(),
@@ -424,7 +452,6 @@ export const knowledgeApi = {
             return;
           }
         }
-        callbacks.onError?.(i18n.t('knowledgeApi.ingest.timeout'));
       } catch (err: unknown) {
         callbacks.onError?.(err instanceof Error ? err.message : String(err));
       }
@@ -580,7 +607,7 @@ export const knowledgeApi = {
 export async function pollWikiStatus(wikiId: string, maxAttempts = 30, intervalMs = 3000): Promise<WikiDetail> {
   for (let i = 0; i < maxAttempts; i++) {
     const detail = await knowledgeApi.wiki.get(wikiId);
-    if (detail.ingest_status === 'idle' || detail.ingest_status === 'failed' || detail.status === 'failed') return detail;
+    if (detail.ingest_status === 'idle' || detail.ingest_status === 'failed' || detail.ingest_status === 'paused' || detail.status === 'failed') return detail;
     await new Promise(r => setTimeout(r, intervalMs));
   }
   throw new Error(i18n.t('knowledgeApi.wikiIngestTimeout', { wikiId }));

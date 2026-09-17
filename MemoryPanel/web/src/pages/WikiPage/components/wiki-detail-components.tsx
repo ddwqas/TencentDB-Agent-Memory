@@ -39,7 +39,7 @@ export function WikiActions({
   ingestBusy: boolean;
   /** 当前这条 wiki 自身是否处于 ingest（pending / processing）状态 */
   isCurrentIngesting: boolean;
-  onIngest: (wikiId: string) => void;
+  onIngest: (wikiId: string, resume?: boolean) => void;
   onAllocate: (target: { wiki_id: string; name: string }) => void;
   onUnbind: (wikiId: string) => void;
   onDelete: (wikiId: string, name: string) => void;
@@ -47,8 +47,9 @@ export function WikiActions({
   const { t } = useTranslation();
   return (
     <div className="_asset-wiki-actions" onClick={(event) => event.stopPropagation()}>
-      <Button type="weak" disabled={ingestBusy} onClick={() => onIngest(source.wiki_id)}>
-        <StarIcon size={14} /> {isCurrentIngesting ? t('wiki.action.ingestBusy') : ingestBusy ? t('wiki.action.queuing') : t(source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
+      <Button type="weak" disabled={ingestBusy} onClick={() => onIngest(source.wiki_id, source.ingest_status === 'paused' || source.ingest_status === 'failed')}>
+        <StarIcon size={14} /> {isCurrentIngesting ? t('wiki.action.ingestBusy') : ingestBusy ? t('wiki.action.queuing')
+          : t(source.ingest_status === 'paused' || source.ingest_status === 'failed' ? 'wiki.analysis.resume' : source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
       </Button>
       {scopeTab === 'fixed' ? (
         <Button type="weak" onClick={() => onUnbind(source.wiki_id)}>

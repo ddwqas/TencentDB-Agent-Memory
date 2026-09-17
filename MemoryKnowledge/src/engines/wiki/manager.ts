@@ -61,6 +61,7 @@ import { getIngestConcurrency } from "../../config.js";
 import { slugify } from "./ingest-v2/slug.js";
 import { DEFAULT_SCHEMA, DEFAULT_PURPOSE } from "./ingest-v2/template.js";
 import { rebuildIndexFile } from "./ingest-v2/index-builder.js";
+import { WikiAnalysisCheckpoint } from "./analysis-checkpoint.js";
 
 const log = createLogger("wiki-mgr");
 
@@ -124,6 +125,8 @@ export interface SearchOptions {
 
 /** ingest 进度回调载荷（KS → Panel）。 */
 export interface IngestProgress {
+  cached?: number;
+  current_files?: string[];
   phase: "extracting" | "merging" | "indexing";
   total: number;
   completed: number;
@@ -138,7 +141,7 @@ export type ProgressFn = (progress: IngestProgress) => void;
 export const PROGRESS_THROTTLE_MS = 500;
 
 /**
- * 节流 onProgress：阶段切换立即发；同阶段仅在 percent 上升且距上次 ≥ minIntervalMs
+ * 节流 onProgress：阶段切换立即发；同阶段百分比或文档计数变化且距上次 ≥ minIntervalMs
  * （或已到 extracting 末段 percent≥90）时发送，避免多源并发打爆 Panel。
  */
 export function createThrottledProgressFn(
@@ -148,23 +151,28 @@ export function createThrottledProgressFn(
   if (!onProgress) return undefined;
   let lastPhase: IngestProgress["phase"] | undefined;
   let lastPercent = -1;
+  let lastCount = -1;
   let lastEmitAt = 0;
   return (p) => {
     const now = Date.now();
     const phaseChanged = p.phase !== lastPhase;
     if (!phaseChanged) {
-      if (p.percent <= lastPercent) return;
+      if (p.percent <= lastPercent && p.completed + p.failed <= lastCount) return;
       const nearExtractEnd = p.phase === "extracting" && p.percent >= 90;
       if (!nearExtractEnd && now - lastEmitAt < minIntervalMs) return;
     }
     lastPhase = p.phase;
     lastPercent = p.percent;
+    lastCount = p.completed + p.failed;
     lastEmitAt = now;
     onProgress(p);
   };
 }
 
 export interface IngestExecOptions {
+  saveProgress?: ProgressFn;
+  signal?: AbortSignal;
+  sourceSnapshot?: string;
   onProgress?: ProgressFn;
   globalLlmLimit?: LimitFunction;
   /** Monotonic build number allocated by WikiService. */
@@ -610,9 +618,11 @@ export async function runIngestIncremental(
   llmConfig: any,
   onProgress?: ProgressFn,
   globalLlmLimit?: LimitFunction,
+  options?: { checkpoint?: WikiAnalysisCheckpoint; signal?: AbortSignal; saveProgress?: ProgressFn },
 ): Promise<IngestOutcome> {
   const { extractSource, commitCandidates, scanExistingPages } = await import("./ingest-v2/index.js");
-  const report = createThrottledProgressFn(onProgress);
+  const notify = createThrottledProgressFn(onProgress);
+  const report = (progress: IngestProgress) => { options?.saveProgress?.(progress); notify?.(progress); };
   const sourcesDir = join(projectPath, "raw", "sources");
   if (!existsSync(sourcesDir)) {
     log.warn("runIngest: raw/sources 不存在，跳过", { projectPath });
@@ -645,6 +655,19 @@ export async function runIngestIncremental(
   const existingPages = scanExistingPages(projectPath);
   const concurrency = getIngestConcurrency();
   const wikiLimit = pLimit(concurrency);
+  const signal = options?.signal;
+  signal?.throwIfAborted();
+  let cached = 0;
+  const activeFiles = new Set<string>();
+  let client: import("./ingest-v2/llm.js").LlmClient | undefined;
+  const { createLlmClient } = await import("./ingest-v2/llm.js");
+  const getClient = () => {
+    if (!client) {
+      const inner = createLlmClient(llmConfig);
+      client = options?.checkpoint ? options.checkpoint.client(inner, signal) : inner;
+    }
+    return client;
+  };
 
   // ── 阶段1：并行 LLM 抽取 ──
   report?.({
@@ -662,14 +685,27 @@ export async function runIngestIncremental(
   const tasks = toIngestDisk.map((d) =>
     wikiLimit(async () => {
       const t0 = Date.now();
+      signal?.throwIfAborted();
+      activeFiles.add(d.filename);
+      report({ phase: "extracting", total: toIngestDisk.length, completed, failed, skipped: skippedCount,
+        cached, current_files: [...activeFiles], percent: Math.round(((completed + failed) / Math.max(toIngestDisk.length, 1)) * 90) });
       try {
-        const candidates = await withSpan("ingest-source", async (span) => {
-          span.setAttribute("source.name", d.filename);
-          const run = () => extractSource(projectPath, d.abs, llmConfig, existingPages);
-          return globalLlmLimit ? globalLlmLimit(run) : run();
-        });
+        let candidates = options?.checkpoint?.readCandidates(d.filename, d.sha256) ?? null;
+        if (candidates) {
+          cached++;
+        } else {
+          candidates = await withSpan("ingest-source", async (span) => {
+            span.setAttribute("source.name", d.filename);
+            const run = () => extractSource(projectPath, d.abs, llmConfig, existingPages, { llm: getClient() });
+            return globalLlmLimit ? globalLlmLimit(run) : run();
+          });
+          signal?.throwIfAborted();
+          options?.checkpoint?.writeCandidates(d.filename, d.sha256, candidates);
+        }
+        activeFiles.delete(d.filename);
         completed++;
         report?.({
+          cached, current_files: [...activeFiles],
           phase: "extracting",
           total: toIngestDisk.length,
           completed,
@@ -684,8 +720,11 @@ export async function runIngestIncremental(
         });
         return { ...d, ok: true as const, candidates, error: null };
       } catch (err) {
+        activeFiles.delete(d.filename);
+        signal?.throwIfAborted();
         failed++;
         report?.({
+          cached, current_files: [...activeFiles],
           phase: "extracting",
           total: toIngestDisk.length,
           completed,
@@ -708,7 +747,13 @@ export async function runIngestIncremental(
     }),
   );
 
-  const extractResults = await Promise.all(tasks);
+  // 等待所有在途调用结束再退出，避免暂停后仍有后台任务写入候选版本。
+  const settled = await Promise.allSettled(tasks);
+  signal?.throwIfAborted();
+  const extractResults = settled.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
 
   // ── 已删源级联清理（与现有逻辑对齐）──
   if (deleted.length > 0) {
@@ -727,6 +772,7 @@ export async function runIngestIncremental(
   // ── 阶段2：串行落盘合并 ──
   report?.({
     phase: "merging",
+    cached, current_files: [],
     total: toIngestDisk.length,
     completed,
     failed,
@@ -745,8 +791,7 @@ export async function runIngestIncremental(
   let llm: import("./ingest-v2/llm.js").LlmClient | undefined;
   if (allCandidates.length > 0) {
     try {
-      const { createLlmClient } = await import("./ingest-v2/llm.js");
-      llm = createLlmClient(llmConfig);
+      llm = getClient();
     } catch (err) {
       log.error("创建 LLM client 失败（阶段2 merge/overview 将降级，source 状态仍会落库）", {
         error: String(err),
@@ -758,7 +803,9 @@ export async function runIngestIncremental(
   const { written, mergeErrors } = await commitCandidates(projectPath, allCandidates, llm, {
     globalLlmLimit,
     skipLog: allCandidates.length === 0,
+    signal,
   });
+  signal?.throwIfAborted();
 
   if (mergeErrors.length > 0) {
     log.warn("阶段2 合并部分页失败", { count: mergeErrors.length, errors: mergeErrors });
@@ -786,6 +833,7 @@ export async function runIngestIncremental(
   // ── 阶段3：overview（FTS 索引由上层 ingest 写事务完成）──
   report?.({
     phase: "indexing",
+    cached, current_files: [],
     total: toIngestDisk.length,
     completed,
     failed,
@@ -815,6 +863,7 @@ export async function runIngestIncremental(
   });
 
   const okCount = processed.filter((p) => p.ok).length;
+  signal?.throwIfAborted();
   log.info("runIngest 全部完成", {
     total: results.length,
     ok: okCount,
@@ -1322,7 +1371,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     const projectPath = state.path;
     const versions = listWikiVersions(projectPath);
     const version = opts?.version ?? Math.max(0, ...versions.map((item) => item.version)) + 1;
-    const build = beginWikiBuild(projectPath, version, "ingest", opts?.gitSource);
+    const build = beginWikiBuild(projectPath, version, "ingest", opts?.gitSource, opts?.sourceSnapshot);
     materializeActivePages(name, projectPath, build.versionDir);
     initWikiProject(build.versionDir);
 
@@ -1346,6 +1395,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
           llmConfig,
           opts?.onProgress,
           opts?.globalLlmLimit,
+          { signal: opts?.signal, checkpoint: new WikiAnalysisCheckpoint(projectPath, build.manifest.base_version_key, llmConfig ?? {}), saveProgress: opts?.saveProgress },
         );
       });
       const attempted = outcome.processed.length;
@@ -1369,13 +1419,14 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
       });
       return outcome.results;
     } catch (err) {
-      failWikiBuild(build, err);
+      failWikiBuild(build, err, opts?.signal?.aborted ? "paused" : "failed");
       // A refresh failure never invalidates an already-published generation.
-      if (!getActiveVersion(projectPath)) {
+      if (!getActiveVersion(projectPath) && !opts?.signal?.aborted) {
         state.status = "error";
         state.error = String(err);
       }
-      log.error("ingest 失败", { name, path: projectPath, error: String(err) });
+      if (opts?.signal?.aborted) log.info("AI 分析已暂停，检查点已保留", { name, path: projectPath });
+      else log.error("ingest 失败", { name, path: projectPath, error: String(err) });
       persist();
       throw err;
     }

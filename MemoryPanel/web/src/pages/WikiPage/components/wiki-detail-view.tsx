@@ -5,19 +5,16 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { History, RotateCcw } from 'lucide-react';
-import { Alert, Button, Card, Input, MetricsBoard, Modal, Progress, SearchBox, StatusTip, TabPanel, Tabs, Tag, Text } from 'tea-component';
+import { Alert, Button, Card, Input, MetricsBoard, Modal, SearchBox, StatusTip, TabPanel, Tabs, Tag, Text } from 'tea-component';
 import {
   ArrowLeftIcon,
   AttachIcon,
   BooksIcon,
   ChartBarIcon,
-  CheckCircleIcon,
   CheckIcon,
-  CloseCircleIcon,
   CloseIcon,
   FileIcon,
   LayersIcon as ArchitectureIcon,
-  LoadingIcon,
   SearchIcon,
   StarIcon,
 } from 'tea-icons-react';
@@ -26,6 +23,7 @@ import { tea } from '@/lib/tea-bridge';
 import { WIKI_ALLOWED_FILE_RE, TYPE_COLORS, TYPE_COLOR_FALLBACK, type DetailTab } from '../constants/wiki-constants';
 import { WikiStatusBadge } from './wiki-ui';
 import { GraphTabContent, PagesTabContent } from './wiki-detail-components';
+import { WikiAnalysisProgress } from './WikiAnalysisProgress';
 import type { WikiSourcesStore } from '../hooks/useWikiSources';
 
 export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
@@ -38,9 +36,8 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
     setShowAddDoc,
     setAddDocTab,
     handleIngest,
+    handlePause,
     ingestBusy,
-    displayIngestState,
-    setIngestState,
     activeTab,
     setActiveTab,
     pages,
@@ -79,6 +76,8 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
 
   const source = sources.find((s) => s.wiki_id === selectedWikiId);
   const wikiName = source?.name ?? '';
+  const analysis = source?.analysis ?? source?.progress;
+  const analyzing = source?.ingest_status === 'pending' || source?.ingest_status === 'processing';
   const [showVersions, setShowVersions] = useState(false);
   const [versions, setVersions] = useState<WikiVersionItem[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
@@ -154,6 +153,13 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
               <Button type="text" onClick={openVersions}>
                 <History size={14} /> {t('wiki.version.history')}
               </Button>
+              {(source.ingest_status === 'pending' || source.ingest_status === 'processing') && source.internal_status !== 'publishing-manual-version' && <Button
+                onClick={() => handlePause(selectedWikiId)}
+                disabled={source.internal_status === 'pausing'}
+              >{t(source.internal_status === 'pausing' ? 'wiki.analysis.pausing' : 'wiki.analysis.pause')}</Button>}
+              {source.source_type === 'git' && (source.ingest_status === 'paused' || source.ingest_status === 'failed') && <Button
+                onClick={() => handleIngest(selectedWikiId)} disabled={ingestBusy}
+              >{t('wiki.analysis.syncLatest')}</Button>}
               {source.source_type !== 'git' && <Button
                 type="text"
                 onClick={() => {
@@ -165,15 +171,16 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
               </Button>}
               <Button
                 type="primary"
-                onClick={() => handleIngest(selectedWikiId)}
+                onClick={() => handleIngest(selectedWikiId, source.ingest_status === 'paused' || source.ingest_status === 'failed')}
                 disabled={ingestBusy}
-                loading={ingestBusy && displayIngestState.wiki === wikiName}
+                loading={analyzing}
               >
-                {ingestBusy && displayIngestState.wiki === wikiName ? (
+                {analyzing ? (
                   t('wiki.detail.processing')
                 ) : (
                   <>
-                    <StarIcon size={14} /> {t(source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
+                    <StarIcon size={14} /> {t(source.ingest_status === 'paused' || source.ingest_status === 'failed'
+                      ? 'wiki.analysis.resume' : source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
                   </>
                 )}
               </Button>
@@ -215,78 +222,13 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
         </Card>
       )}
 
-      {(displayIngestState.active || displayIngestState.log.length > 0) &&
-        displayIngestState.wiki === wikiName && (
-          <Card className="_wiki-detail-ingest-card">
-            <Card.Body>
-              <div className="_wiki-detail-ingest">
-                <div className="_wiki-detail-ingest-head">
-                  <Text className="_wiki-detail-ingest-title">
-                    {displayIngestState.active ? (
-                      <LoadingIcon size={14} />
-                    ) : (
-                      <CheckCircleIcon size={14} />
-                    )}{' '}
-                    {t('wiki.detail.ingestTitle', { name: displayIngestState.wiki })}
-                  </Text>
-                  {!displayIngestState.active && (
-                    <Button
-                      type="text"
-                      onClick={() => setIngestState((state) => ({ ...state, log: [] }))}
-                    >
-                      {t('wiki.detail.clear')}
-                    </Button>
-                  )}
-                </div>
-                {displayIngestState.total > 0 && (
-                  <>
-                    <Progress
-                      percent={Math.round(
-                        (displayIngestState.done / displayIngestState.total) * 100,
-                      )}
-                    />
-                    <div className="_wiki-detail-ingest-meta">
-                      <Text theme="label">{displayIngestState.detail}</Text>
-                      <Text theme="label">
-                        {displayIngestState.done}/{displayIngestState.total}
-                      </Text>
-                    </div>
-                    {displayIngestState.checkCount > 0 && (
-                      <Text theme="label">
-                        {t('wiki.detail.queryCount', { count: displayIngestState.checkCount })}
-                        {displayIngestState.lastCheckedAt
-                          ? t('wiki.detail.lastQuery', { time: displayIngestState.lastCheckedAt })
-                          : ''}
-                      </Text>
-                    )}
-                  </>
-                )}
-                {displayIngestState.active && displayIngestState.currentFile && (
-                  <Text theme="label" className="_wiki-detail-ingest-file">
-                    <FileIcon size={12} /> {displayIngestState.currentFile}
-                  </Text>
-                )}
-                {displayIngestState.log.length > 0 && (
-                  <div className="_wiki-detail-ingest-log">
-                    {displayIngestState.log.map((item, index) => (
-                      <div key={`${item.file}-${index}`} className="_wiki-detail-ingest-log-item">
-                        {item.status === 'done' ? (
-                          <CheckCircleIcon size={12} />
-                        ) : (
-                          <CloseCircleIcon size={12} />
-                        )}
-                        <span className="_wiki-detail-ingest-log-file">{item.file}</span>
-                        {item.error && (
-                          <span className="_wiki-detail-ingest-log-error">{item.error}</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </Card.Body>
-          </Card>
-        )}
+      {(analysis || source.ingest_status !== 'idle') && (
+        <Card className="_wiki-detail-ingest-card">
+          <Card.Body>
+            <WikiAnalysisProgress wiki={source} />
+          </Card.Body>
+        </Card>
+      )}
 
       <Tabs
         activeId={activeTab}

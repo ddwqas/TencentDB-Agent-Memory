@@ -26,6 +26,7 @@ export function WikiStatusBadge({
     <span className="_wiki-status-tags">
       <StatusTag label={label} theme={theme} />
       {building && <StatusTag label={t('wiki.status.updating')} theme="warning" />}
+      {ingestStatus === 'paused' && <StatusTag label={t('wiki.analysis.paused')} theme="warning" />}
       {updateFailed && <StatusTag label={t('wiki.status.updateFailed')} theme="error" />}
     </span>
   );

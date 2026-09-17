@@ -70,8 +70,10 @@ notepad .env
 
 ```powershell
 .\status.ps1
-Get-Content .\.runtime\logs\proxy.stderr.log -Wait
+Get-Content ('.\.runtime\logs\proxy.stderr_' + (Get-Date -Format 'yyyy-MM-dd') + '.log') -Wait
 ```
+
+各服务日志采用 `<服务>.stdout_YYYY-MM-DD.log` 和 `<服务>.stderr_YYYY-MM-DD.log`，按本地日期追加。同一天多次启动不会覆盖，跨午夜运行会自动写入新一天的文件，旧日志不会被启动脚本删除。
 
 停止服务并保留 SQLite 数据：
 

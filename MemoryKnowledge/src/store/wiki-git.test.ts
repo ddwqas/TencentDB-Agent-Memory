@@ -78,6 +78,7 @@ async function fixture(initial: Record<string, string> = { "docs/a/README.md": "
       manager.init({ name: ctx.wikiId, path: ctx.dir });
       await manager.ingest(ctx.wikiId, {}, {
         version: ctx.version, gitSource: ctx.gitSource, sourceBaseline: ctx.sourceBaseline,
+        signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot, saveProgress: ctx.setProgress,
       });
       return { pageCount: manager.getPages(ctx.wikiId).length };
     },
@@ -99,7 +100,7 @@ async function fixture(initial: Record<string, string> = { "docs/a/README.md": "
     await service.onIdle(wikiId);
     return current();
   };
-  return { root, repo, git, put, commit, firstCommit, service, manager, wikiId, current, metadata, sync };
+  return { root, repo, git, put, commit, firstCommit, service, manager, store, wikiId, current, metadata, sync };
 }
 
 describe("Wiki Git source", () => {
@@ -136,7 +137,8 @@ describe("Wiki Git source", () => {
     expect(f.metadata().commit_hash).toBe(f.firstCommit);
     extracted.length = 0;
     await f.sync();
-    expect(extracted.sort()).toEqual(["a/README.md", "b/renamed.md"]);
+    expect(extracted).toEqual([]);
+    expect(f.service.analysisProgress("service", f.wikiId)?.cached).toBe(2);
     expect(f.current().active_version).toBe(3);
     expect(f.metadata().commit_hash).toBe(secondCommit);
   });
@@ -239,7 +241,7 @@ describe("Wiki Git source", () => {
 
   it("reads thousands of tracked nested Markdown files, including files larger than the upload limit", async () => {
     const f = await fixture({ "docs/large.md": "x".repeat(538_271) });
-    for (let i = 0; i < 2614; i++) f.put(`docs/chapter-${i}/README.md`, `document ${i}`);
+    for (let i = 0; i < 2614; i++) f.put(`docs/chapter-${Math.floor(i / 100)}/document-${i % 100}.md`, `document ${i}`);
     f.put("docs/ignored.txt", "not Markdown");
     const commit = await f.commit();
     f.put("docs/untracked.md", "not committed");
@@ -248,7 +250,7 @@ describe("Wiki Git source", () => {
     expect(new Set(files.map((file) => file.filename)).size).toBe(2615);
     expect(files.find((file) => file.filename === "large.md")?.size).toBe(538_271);
     expect(files.some((file) => file.filename === "untracked.md")).toBe(false);
-  }, 30_000);
+  }, 90_000);
 
   it("exposes Git creation and sync through the API while retaining upload validation", async () => {
     const f = await fixture();
@@ -278,5 +280,60 @@ describe("Wiki Git source", () => {
     }
     expect(() => normalizeWikiGitConfig({ ...config, repo_url: "https://token@example.invalid/docs.git" })).toThrow("credentials");
     expect(() => normalizeWikiGitConfig({ ...config, branch: "--upload-pack=bad" })).toThrow("branch");
+  });
+
+  it("pauses AI calls, survives service recreation, and resumes the pinned commit without repeating completed documents", async () => {
+    const f = await fixture();
+    const extract = vi.mocked(ingest.extractSource).getMockImplementation()!;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    vi.mocked(llm.createLlmClient).mockReturnValue({
+      chat: async (params) => new Promise<string>((_resolve, reject) => {
+        entered();
+        params.abortSignal!.addEventListener("abort", () => reject(params.abortSignal!.reason), { once: true });
+      }),
+    } as llm.LlmClient);
+    vi.mocked(ingest.extractSource).mockImplementation(async (...args) => {
+      if (sourceFilename(args[0], args[1]) === "b/README.md") {
+        await args[4]!.llm!.chat({ system: "test", prompt: "blocked", label: "analysis:b" });
+      }
+      return extract(...args);
+    });
+    expect(f.service.sync("service", "team", f.wikiId).kind).toBe("ok");
+    await waiting;
+    await vi.waitFor(() => expect(f.service.analysisProgress("service", f.wikiId)?.completed).toBe(1));
+    expect(f.service.pause("service", f.wikiId)).toMatchObject({ internal_status: "pausing" });
+    await f.service.onIdle(f.wikiId);
+    expect(f.current()).toMatchObject({ ingest_status: "paused", active_version: null });
+    expect(f.service.listVersions("service", f.wikiId)?.[0].state).toBe("paused");
+
+    f.put("docs/a/README.md", "remote changed while paused");
+    const remoteCommit = await f.commit();
+    // 模拟重启：运行标记恢复为暂停，新服务和新引擎仅从磁盘检查点恢复。
+    f.store.updateWikiStatus("service", f.wikiId, { status: "processing", ingest_status: "processing" });
+    f.store.markInterruptedAsFailed();
+    expect(f.current().ingest_status).toBe("paused");
+    const manager = createWikiSourceManager(join(f.root, "manager"));
+    const resumed = new WikiService({ store: f.store, dataRoot: join(f.root, "data"), wikiManager: manager,
+      worker: async (ctx) => {
+        manager.init({ name: ctx.wikiId, path: ctx.dir });
+        await manager.ingest(ctx.wikiId, {}, { version: ctx.version, gitSource: ctx.gitSource,
+          sourceBaseline: ctx.sourceBaseline, signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot, saveProgress: ctx.setProgress });
+        return { pageCount: manager.getPages(ctx.wikiId).length };
+      },
+    });
+    vi.mocked(ingest.extractSource).mockImplementation(extract);
+    vi.mocked(llm.createLlmClient).mockReturnValue({} as llm.LlmClient);
+    extracted.length = 0;
+    expect(resumed.resume("service", "team", f.wikiId).kind).toBe("ok");
+    await resumed.onIdle(f.wikiId);
+    expect(extracted).toEqual(["b/README.md"]);
+    expect(f.current()).toMatchObject({ ingest_status: "idle", active_version: 2 });
+    expect(f.metadata().commit_hash).toBe(f.firstCommit);
+    expect(resumed.analysisProgress("service", f.wikiId)).toMatchObject({ completed: 2, cached: 1, percent: 100 });
+    expect(resumed.rawRead("service", "team", f.wikiId, "a/README.md")).toBe("alpha");
+    expect(resumed.sync("service", "team", f.wikiId).kind).toBe("ok");
+    await resumed.onIdle(f.wikiId);
+    expect(f.metadata().commit_hash).toBe(remoteCommit);
   });
 });

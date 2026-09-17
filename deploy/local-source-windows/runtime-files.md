@@ -56,10 +56,12 @@
 
 由启动脚本重定向生成：
 
-- `memory-core.stdout.log` / `memory-core.stderr.log`
-- `knowledge.stdout.log` / `knowledge.stderr.log`
-- `panel.stdout.log` / `panel.stderr.log`
-- `proxy.stdout.log` / `proxy.stderr.log`
+- `memory-core.stdout_YYYY-MM-DD.log` / `memory-core.stderr_YYYY-MM-DD.log`
+- `knowledge.stdout_YYYY-MM-DD.log` / `knowledge.stderr_YYYY-MM-DD.log`
+- `panel.stdout_YYYY-MM-DD.log` / `panel.stderr_YYYY-MM-DD.log`
+- `proxy.stdout_YYYY-MM-DD.log` / `proxy.stderr_YYYY-MM-DD.log`
+
+日志按本地日期追加，同日重启保留已有内容，跨日自动切换文件。旧版未带日期的日志文件保留，不在启动时覆盖。
 - `observability.log`
 
 日志用于排查启动、请求、Ingest 和上游调用问题，不是业务数据。日志中可能包含本机绝对路径，删除不会影响用户数据。

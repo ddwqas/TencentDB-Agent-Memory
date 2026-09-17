@@ -744,3 +744,60 @@
   max-height: 200px;
   overflow-y: auto;
 }
+._wiki-analysis-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 4px 0;
+}
+
+._wiki-analysis-progress-heading,
+._wiki-analysis-progress-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
+._wiki-analysis-progress-heading {
+  justify-content: space-between;
+  color: var(--tea-color-text-primary);
+}
+
+._wiki-analysis-progress-stats,
+._wiki-analysis-current-files {
+  color: var(--tea-color-text-secondary);
+  font-size: 13px;
+}
+
+._wiki-analysis-current-files ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+
+._wiki-analysis-current-files li + li {
+  margin-top: 4px;
+}
+
+._wiki-analysis-updated {
+  color: var(--tea-color-text-secondary);
+  font-size: 12px;
+}
+
+._wiki-analysis-progress--compact {
+  gap: 6px;
+  font-size: 12px;
+}
+
+._wiki-analysis-progress--compact ._wiki-analysis-progress-stats {
+  gap: 4px 10px;
+  font-size: 12px;
+}
+
+._wiki-analysis-progress--compact ._wiki-analysis-current-files ul {
+  max-height: 74px;
+  overflow-y: auto;
+  font-size: 12px;
+}

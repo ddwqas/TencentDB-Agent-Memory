@@ -1,5 +1,5 @@
 /** Wiki 的 Git 文档配置、固定提交快照与差异统计；不执行知识分析。 */
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import simpleGit from "simple-git";
 import { GitSourceFetcher } from "./git-fetcher.js";
@@ -41,6 +41,21 @@ export interface WikiGitFile {
   content: string;
   size: number;
   sha256: string;
+}
+
+/** 继续分析固定的原文快照，不在恢复操作中拉取新的远程提交。 */
+export function readWikiGitSnapshot(directory: string, prefix = ""): WikiGitFile[] {
+  const files: WikiGitFile[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    const filename = prefix + entry.name;
+    if (entry.isDirectory()) files.push(...readWikiGitSnapshot(path, `${filename}/`));
+    else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+      const content = readFileSync(path, "utf8");
+      files.push({ filename, content, sha256: sha256(content), size: Buffer.byteLength(content, "utf8") });
+    }
+  }
+  return files;
 }
 
 export function normalizeWikiGitConfig(config: WikiGitConfig): WikiGitConfig {

@@ -43,21 +43,26 @@ import {
   recordSourceIngestResult,
   type SourceStatus,
 } from "../engines/wiki/index-db.js";
-import { createWikiSourceManager, type WikiSourceManager } from "../engines/wiki/index.js";
+import { createWikiSourceManager, type WikiSourceManager, type IngestProgress } from "../engines/wiki/index.js";
+import { readAnalysisProgress, saveAnalysisProgress } from "../engines/wiki/analysis-checkpoint.js";
 import {
   appendSourceHistory,
   sourceStateDbPath,
   getActiveVersion,
   listWikiVersions,
+  getVersionDir,
   type WikiVersionItem,
 } from "../engines/wiki/version-store.js";
 import {
   normalizeWikiGitConfig, readWikiGitMetadata, writeWikiGitMetadata,
-  fetchWikiGitSnapshot, compareWikiGitFiles,
+  fetchWikiGitSnapshot, compareWikiGitFiles, readWikiGitSnapshot,
   type WikiGitConfig, type WikiGitProvenance, type WikiGitFile,
 } from "../source-fetcher/wiki-git-source.js";
 
 export interface WikiBuildContext {
+  signal?: AbortSignal;
+  sourceSnapshot?: string;
+  setProgress?: (progress: IngestProgress) => void;
   wikiId: string;
   serviceId: string;
   teamId: string;
@@ -249,6 +254,7 @@ export class WikiService {
    * Node 单线程，读写无并发）。清理收尾后移除。
    */
   private readonly cancelled = new Set<string>();
+  private readonly analysisControllers = new Map<string, AbortController>();
 
   constructor(opts: WikiServiceOptions) {
     this.store = opts.store;
@@ -316,7 +322,7 @@ export class WikiService {
    * 显式触发 ingest（LLM 加工 raw → page + 建索引）。
    * 立即返回，后台异步执行。memory/team 不匹配返回 not_found；pending/processing 返回 busy。
    */
-  ingest(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string): IngestResult {
+  ingest(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string, resume = false): IngestResult {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return { kind: "not_found" };
     // 并发拒绝：正在排队/执行中直接拒绝，不覆盖状态、不重复入队、不写 audit。
@@ -334,14 +340,37 @@ export class WikiService {
       version: nextVersion,
     });
     this.audit({ ...row, version: nextVersion }, "ingest", "manual ingest", requesterUserId);
+    this.analysisControllers.set(wikiId, new AbortController());
     const fresh = this.store.getWiki(serviceId, teamId, wikiId);
-    if (fresh) this.enqueueBuild(fresh, requesterUserId);
+    if (fresh) this.enqueueBuild(fresh, requesterUserId, resume);
     return fresh ? { kind: "ok", row: fresh } : { kind: "not_found" };
   }
 
   /** sync 语义 = 重跑 ingest（管控显式触发）。 */
   sync(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string): IngestResult {
     return this.ingest(serviceId, teamId, wikiId, requesterUserId);
+  }
+
+  /** 暂停在途 AI 调用；已持久化的响应和候选结果保留供继续分析使用。 */
+  pause(serviceId: string, wikiId: string): WikiRow | null | "not_running" {
+    const row = this.store.getWikiById(serviceId, wikiId);
+    if (!row) return null;
+    if (row.ingest_status === "paused") return row;
+    if (row.ingest_status !== "pending" && row.ingest_status !== "processing") return "not_running";
+    const controller = this.analysisControllers.get(wikiId);
+    if (!controller) return "not_running";
+    controller.abort(new DOMException("analysis paused", "AbortError"));
+    this.store.updateWikiStatus(serviceId, wikiId, { internal_status: "pausing" });
+    return this.store.getWikiById(serviceId, wikiId);
+  }
+
+  resume(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string): IngestResult {
+    return this.ingest(serviceId, teamId, wikiId, requesterUserId, true);
+  }
+
+  analysisProgress(serviceId: string, wikiId: string) {
+    const row = this.store.getWikiById(serviceId, wikiId);
+    return row ? readAnalysisProgress(this.dirFor(serviceId, row.team_id, wikiId)) : null;
   }
 
   listVersions(serviceId: string, wikiId: string): WikiVersionItem[] | null {
@@ -423,6 +452,7 @@ export class WikiService {
 
     if (this.isBuildBusy(row)) {
       this.cancelled.add(wikiId);
+      this.analysisControllers.get(wikiId)?.abort(new DOMException("wiki deleted", "AbortError"));
     }
 
     this.audit(row, "delete", null);
@@ -472,6 +502,7 @@ export class WikiService {
   private finishCancelled(serviceId: string, teamId: string, wikiId: string): void {
     this.cleanupResources(serviceId, teamId, wikiId);
     this.cancelled.delete(wikiId);
+    this.analysisControllers.delete(wikiId);
     this.logger?.info?.(`[wiki] ${wikiId} build aborted (deleted during processing)`);
   }
 
@@ -1193,17 +1224,21 @@ export class WikiService {
     }
   }
 
-  private enqueueBuild(row: WikiRow, requesterUserId?: string): void {
-    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, row.version, requesterUserId));
+  private enqueueBuild(row: WikiRow, requesterUserId?: string, resume = false): void {
+    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, row.version, requesterUserId, resume));
   }
 
-  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string, version: number, requesterUserId?: string): Promise<void> {
+  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string, version: number, requesterUserId?: string, resume = false): Promise<void> {
     // 入口检查点：pending 期间被删 → 跳过，不置 processing、不 ingest。
     if (this.isDeleted(serviceId, wikiId)) {
       this.finishCancelled(serviceId, teamId, wikiId);
       return;
     }
     const before = this.store.getWikiById(serviceId, wikiId);
+    const controller = this.analysisControllers.get(wikiId) ?? new AbortController();
+    const signal = controller.signal;
+    const root = this.dirFor(serviceId, teamId, wikiId);
+    let sourceSnapshot: string | undefined;
     const hasActiveVersion = before?.active_version != null;
     let gitMetadata = before?.source_type === "git" ? readWikiGitMetadata(before.metadata_json) : null;
     let gitSource: WikiGitProvenance | undefined;
@@ -1219,15 +1254,21 @@ export class WikiService {
     // 进度/终态 callback 共用同一代际，Panel 可拒绝 clear 后的迟到 progress
     const ingestRunId = randomUUID();
     try {
+      signal.throwIfAborted();
       if (before?.source_type === "git") {
         if (!gitMetadata) throw new Error("Git source configuration is missing");
-        const root = this.dirFor(serviceId, teamId, wikiId);
         const active = getActiveVersion(root);
         sourceBaseline = active
           ? readSourceStates(getReadDb(wikiId, root, join(root, active.index_file)))
           : new Map();
         const publishedSource = listWikiVersions(root).find((item) => item.active)?.git_source;
-        const snapshot = await fetchWikiGitSnapshot(gitMetadata, join(root, "git-cache"), !!publishedSource);
+        const previous = resume ? listWikiVersions(root).find((item) => item.reason === "ingest"
+          && item.version === before.version && item.state !== "published" && item.base_version === before.active_version && item.git_source) : undefined;
+        if (previous) sourceSnapshot = join(getVersionDir(root, previous.version_key), "pending", "sources");
+        const snapshot = previous?.git_source && sourceSnapshot
+          ? { source: previous.git_source, files: readWikiGitSnapshot(sourceSnapshot) }
+          : await fetchWikiGitSnapshot(gitMetadata, join(root, "git-cache"), !!publishedSource);
+        signal.throwIfAborted();
         if (this.isDeleted(serviceId, wikiId)) { this.finishCancelled(serviceId, teamId, wikiId); return; }
         gitSource = snapshot.source;
         gitMetadata = { ...gitMetadata, last_sync: compareWikiGitFiles(snapshot.files, sourceBaseline, gitSource.commit_hash) };
@@ -1265,6 +1306,9 @@ export class WikiService {
         version,
         gitSource,
         sourceBaseline,
+        sourceSnapshot,
+        signal,
+        setProgress: (progress) => saveAnalysisProgress(root, version, progress),
       });
       // 结束前检查点：processing 期间被删 → 跳过 ready/audit/回调，幂等收尾清理。
       if (this.isDeleted(serviceId, wikiId)) {
@@ -1291,6 +1335,8 @@ export class WikiService {
         last_sync_at: new Date().toISOString(),
       });
       const synced = this.store.getWikiById(serviceId, wikiId);
+      const progress = readAnalysisProgress(root);
+      if (progress?.version === version) saveAnalysisProgress(root, version, { ...progress, percent: 100, current_files: [] });
       if (synced) {
         this.audit(synced, "ready", result?.pageCount != null ? `pages: ${result.pageCount}` : null);
       }
@@ -1303,6 +1349,16 @@ export class WikiService {
       // worker 抛错，但若期间已被删，视为取消而非失败：跳过 failed 状态/回调，做清理。
       if (this.isDeleted(serviceId, wikiId)) {
         this.finishCancelled(serviceId, teamId, wikiId);
+        return;
+      }
+      if (signal.aborted) {
+        this.store.updateWikiStatus(serviceId, wikiId, {
+          status: hasActiveVersion ? "ready" : "draft", ingest_status: "paused",
+          building_version: null, internal_status: null, sync_error: null,
+        });
+        const progress = readAnalysisProgress(root);
+        if (progress) saveAnalysisProgress(root, version, { ...progress, current_files: [] });
+        this.logger?.info?.(`[wiki] ${wikiId} analysis paused; checkpoints retained`);
         return;
       }
       if (gitMetadata && hasGitReport) {
@@ -1325,6 +1381,8 @@ export class WikiService {
 
       // Callback TMC about failure
       await this.onBuildComplete(failed, hasActiveVersion ? "ready" : "failed", msg, ingestRunId);
+    } finally {
+      if (this.analysisControllers.get(wikiId) === controller) this.analysisControllers.delete(wikiId);
     }
   }
 

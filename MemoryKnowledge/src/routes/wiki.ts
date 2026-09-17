@@ -65,10 +65,10 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
 
     const row = wikiService.getById(serviceId, wikiId);
     if (!row) return c.json(wrapError(404, "wiki not found"), 404);
-    return c.json(wrapOk(toWikiDetail(row)));
+    return c.json(wrapOk({ ...toWikiDetail(row), analysis: wikiService.analysisProgress(serviceId, wikiId) }));
   });
 
-  for (const path of ["/ingest", "/sync"]) app.post(path, async (c) => {
+  for (const path of ["/ingest", "/sync", "/resume"]) app.post(path, async (c) => {
     const body = await c.req.json<Record<string, unknown>>();
     const serviceId = c.req.header("x-tdai-service-id");
     if (!isValidIdSegment(serviceId)) return c.json(wrapError(400, "x-tdai-service-id header is required"), 400);
@@ -85,13 +85,26 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       return c.json(wrapError(400, "wiki has no source files, upload before ingest"), 400);
     }
 
-    const result = wikiService.ingest(serviceId, row.team_id, wikiId, requesterUserId);
+    const result = path === "/resume"
+      ? wikiService.resume(serviceId, row.team_id, wikiId, requesterUserId)
+      : wikiService.ingest(serviceId, row.team_id, wikiId, requesterUserId);
     if (result.kind === "not_found") return c.json(wrapError(404, "wiki not found"), 404);
     if (result.kind === "busy") {
       // 并发拒绝：干净最小的 409 响应体（调用方用 code 判断，不 parse message）。
       return c.json({ code: 409, message: "busy", data: { status: result.status, step: result.step } }, 409);
     }
     return c.json(wrapOk({ wiki_id: result.row.wiki_id, status: result.row.status }), 202);
+  });
+
+  app.post("/pause", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>();
+    const serviceId = c.req.header("x-tdai-service-id");
+    const wikiId = body.wiki_id;
+    if (!isValidIdSegment(serviceId) || !isValidIdSegment(wikiId)) return c.json(wrapError(400, "service_id and wiki_id are required"), 400);
+    const row = wikiService.pause(serviceId, wikiId);
+    if (!row) return c.json(wrapError(404, "wiki not found"), 404);
+    if (row === "not_running") return c.json(wrapError(409, "Wiki analysis is not running"), 409);
+    return c.json(wrapOk(toWikiDetail(row)), 202);
   });
 
   app.post("/version/list", async (c) => {

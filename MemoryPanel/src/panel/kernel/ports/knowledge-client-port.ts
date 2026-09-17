@@ -45,7 +45,22 @@ export interface WikiCreateSource {
   docs_path?: string;
 }
 
+export interface WikiAnalysisProgress {
+  phase: 'extracting' | 'merging' | 'indexing';
+  total: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  cached?: number;
+  current_files?: string[];
+  percent: number;
+  version?: number;
+  updated_at?: string;
+}
+
 export interface WikiDetail {
+  analysis?: WikiAnalysisProgress | null;
+  progress?: WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
   git?: WikiGitState | null;
   wiki_id: string;
@@ -54,7 +69,7 @@ export interface WikiDetail {
   service_url: string | null;
   summary: string | null;
   status: 'draft' | 'pending' | 'processing' | 'ready' | 'failed';
-  ingest_status: 'idle' | 'pending' | 'processing' | 'failed';
+  ingest_status: 'idle' | 'pending' | 'processing' | 'failed' | 'paused';
   active_version: number | null;
   building_version: number | null;
   internal_status?: string | null;
@@ -82,7 +97,7 @@ export interface WikiVersionItem {
   schema_version: 1;
   version: number;
   version_key: string;
-  state: 'building' | 'published' | 'failed';
+  state: 'building' | 'published' | 'failed' | 'paused';
   active: boolean;
   base_version: number | null;
   base_version_key: string | null;
@@ -232,6 +247,8 @@ export interface KnowledgeClientPort {
   // Wiki — 资产层（create/list 带 IdFields；get/ingest/delete 仅资产 id 寻址）
   wikiCreate(teamId: string, name: string, userId?: string, source?: WikiCreateSource): Promise<WikiDetail>;
   wikiSync(wikiId: string, userId?: string): Promise<WikiIngestResult>;
+  wikiPause(wikiId: string): Promise<WikiDetail>;
+  wikiResume(wikiId: string, userId?: string): Promise<WikiIngestResult>;
   wikiGet(wikiId: string): Promise<WikiDetail>;
   wikiIngest(wikiId: string): Promise<WikiIngestResult>;
   wikiDelete(wikiIds: string[]): Promise<BatchDeleteResult>;

@@ -374,6 +374,7 @@ export async function requireKnowledgeRead(
 }
 
 export interface KnowledgeAssetListItem {
+  analysis?: import('../../../kernel/ports/knowledge-client-port.js').WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
   git?: import('../../../kernel/ports/knowledge-client-port.js').WikiGitState | null;
   knowledge_id: string;
@@ -425,6 +426,7 @@ async function joinWikiKs(
     return {
       ...base,
       source_type: ks.source_type,
+      analysis: ks.analysis,
       git: ks.git,
       team_id: ks.team_id,
       status: ks.status,
