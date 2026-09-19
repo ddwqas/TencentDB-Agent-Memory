@@ -46,6 +46,8 @@ export interface WikiCreateSource {
 }
 
 export interface WikiAnalysisProgress {
+  selected_count?: number;
+  cleanup_count?: number;
   phase: 'extracting' | 'merging' | 'indexing';
   total: number;
   completed: number;
@@ -58,7 +60,29 @@ export interface WikiAnalysisProgress {
   updated_at?: string;
 }
 
+export interface WikiDocument {
+  filename: string;
+  size: number;
+  status: 'pending' | 'changed' | 'processing' | 'completed' | 'failed' | 'deleted';
+  error?: string | null;
+}
+
+export interface WikiDocumentList {
+  items: WikiDocument[];
+  total: number;
+  completed: number;
+  deleted: number;
+}
+
+export interface WikiSelectionRequest {
+  filenames: string[];
+  deleted_filenames?: string[];
+  force?: boolean;
+}
+
 export interface WikiDetail {
+  selection_resumable?: boolean;
+  document_summary?: { total: number; completed: number; deleted: number } | null;
   analysis?: WikiAnalysisProgress | null;
   progress?: WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
@@ -248,6 +272,9 @@ export interface KnowledgeClientPort {
   wikiCreate(teamId: string, name: string, userId?: string, source?: WikiCreateSource): Promise<WikiDetail>;
   wikiSync(wikiId: string, userId?: string): Promise<WikiIngestResult>;
   wikiPause(wikiId: string): Promise<WikiDetail>;
+  wikiDocuments(wikiId: string): Promise<WikiDocumentList>;
+  wikiAnalyze(wikiId: string, selection: WikiSelectionRequest, userId?: string): Promise<WikiIngestResult>;
+  wikiSyncDocuments(wikiId: string, userId?: string): Promise<WikiIngestResult>;
   wikiResume(wikiId: string, userId?: string): Promise<WikiIngestResult>;
   wikiGet(wikiId: string): Promise<WikiDetail>;
   wikiIngest(wikiId: string): Promise<WikiIngestResult>;

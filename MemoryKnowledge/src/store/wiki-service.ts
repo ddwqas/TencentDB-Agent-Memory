@@ -19,6 +19,8 @@ import {
   readFileSync,
   existsSync,
   renameSync,
+  cpSync,
+  lstatSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 
@@ -51,6 +53,7 @@ import {
   getActiveVersion,
   listWikiVersions,
   getVersionDir,
+  atomicWriteJson,
   type WikiVersionItem,
 } from "../engines/wiki/version-store.js";
 import {
@@ -58,8 +61,18 @@ import {
   fetchWikiGitSnapshot, compareWikiGitFiles, readWikiGitSnapshot,
   type WikiGitConfig, type WikiGitProvenance, type WikiGitFile,
 } from "../source-fetcher/wiki-git-source.js";
+import type { WikiAnalysisScope, WikiSelectionRequest, WikiDocument } from "../engines/wiki/analysis-scope.js";
+
+interface SelectionTask {
+  scope: WikiAnalysisScope;
+  snapshot: string;
+  base_version: number | null;
+  git_source?: WikiGitProvenance;
+  completed: boolean;
+}
 
 export interface WikiBuildContext {
+  analysisScope?: WikiAnalysisScope;
   signal?: AbortSignal;
   sourceSnapshot?: string;
   setProgress?: (progress: IngestProgress) => void;
@@ -322,27 +335,31 @@ export class WikiService {
    * 显式触发 ingest（LLM 加工 raw → page + 建索引）。
    * 立即返回，后台异步执行。memory/team 不匹配返回 not_found；pending/processing 返回 busy。
    */
-  ingest(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string, resume = false): IngestResult {
+  ingest(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string, resume = false, task?: SelectionTask, syncOnly = false): IngestResult {
     const row = this.store.getWiki(serviceId, teamId, wikiId);
     if (!row) return { kind: "not_found" };
     // 并发拒绝：正在排队/执行中直接拒绝，不覆盖状态、不重复入队、不写 audit。
     if (row.ingest_status === "pending" || row.ingest_status === "processing") {
       return { kind: "busy", status: row.ingest_status, step: row.internal_status };
     }
+    if (!task && !syncOnly && !resume) {
+      const previous = this.readSelectionTask(this.dirFor(serviceId, teamId, wikiId));
+      if (previous && !previous.completed) atomicWriteJson(join(this.dirFor(serviceId, teamId, wikiId), "selection-task.json"), { ...previous, completed: true });
+    }
     // Git 无变化时不分配版本号；完成拉取和差异检查后再分配。
-    const nextVersion = row.source_type === "git" ? row.version : row.version + 1;
+    const nextVersion = syncOnly || (row.source_type === "git" && !task) ? row.version : row.version + 1;
     this.store.updateWikiStatus(serviceId, wikiId, {
       status: row.active_version != null ? "ready" : "pending",
       ingest_status: "pending",
       building_version: row.source_type === "git" ? null : nextVersion,
-      internal_status: row.source_type === "git" ? "fetching" : null,
+      internal_status: syncOnly ? "syncing-documents" : row.source_type === "git" && !task ? "fetching" : "scanning",
       sync_error: null,
       version: nextVersion,
     });
     this.audit({ ...row, version: nextVersion }, "ingest", "manual ingest", requesterUserId);
     this.analysisControllers.set(wikiId, new AbortController());
     const fresh = this.store.getWiki(serviceId, teamId, wikiId);
-    if (fresh) this.enqueueBuild(fresh, requesterUserId, resume);
+    if (fresh) this.enqueueBuild(fresh, requesterUserId, resume, task, syncOnly);
     return fresh ? { kind: "ok", row: fresh } : { kind: "not_found" };
   }
 
@@ -356,6 +373,7 @@ export class WikiService {
     const row = this.store.getWikiById(serviceId, wikiId);
     if (!row) return null;
     if (row.ingest_status === "paused") return row;
+    if (row.internal_status === "syncing-documents") return "not_running";
     if (row.ingest_status !== "pending" && row.ingest_status !== "processing") return "not_running";
     const controller = this.analysisControllers.get(wikiId);
     if (!controller) return "not_running";
@@ -365,12 +383,114 @@ export class WikiService {
   }
 
   resume(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string): IngestResult {
+    const row = this.store.getWiki(serviceId, teamId, wikiId);
+    if (!row) return { kind: "not_found" };
+    const root = this.dirFor(serviceId, teamId, wikiId);
+    const task = this.readSelectionTask(root);
+    if (task && !task.completed) {
+      if (task.base_version !== row.active_version) throw new Error("the active version changed; select documents for a new analysis");
+      return this.ingest(serviceId, teamId, wikiId, requesterUserId, false, task);
+    }
     return this.ingest(serviceId, teamId, wikiId, requesterUserId, true);
+  }
+
+  /** 同步只刷新原文和差异，不调用模型，也不自动删除知识。 */
+  syncDocuments(serviceId: string, teamId: string, wikiId: string, requesterUserId?: string): IngestResult {
+    const row = this.store.getWiki(serviceId, teamId, wikiId);
+    if (!row) return { kind: "not_found" };
+    if (row.source_type !== "git") throw new Error("document sync requires a Git Wiki");
+    return this.ingest(serviceId, teamId, wikiId, requesterUserId, false, undefined, true);
+  }
+
+  private readSelectionTask(root: string): SelectionTask | null {
+    try {
+      const task = JSON.parse(readFileSync(join(root, "selection-task.json"), "utf8")) as SelectionTask;
+      if (!/^[a-f0-9-]{36}$/i.test(task.scope?.task_id ?? "")) return null;
+      return { ...task, snapshot: join(root, "analysis-tasks", task.scope.task_id, "sources") };
+    }
+    catch { return null; }
+  }
+
+  /** 以实际生效索引判断完成状态；上传或同步过不等于已经分析成功。 */
+  documents(serviceId: string, wikiId: string): { items: WikiDocument[]; total: number; completed: number; deleted: number } | null {
+    const row = this.store.getWikiById(serviceId, wikiId);
+    if (!row) return null;
+    const root = this.dirFor(serviceId, row.team_id, wikiId);
+    const active = getActiveVersion(root);
+    const baseline = active ? new Map(listSources(getReadDb(wikiId, root, join(root, active.index_file))).map((s) => [s.filename, s])) : new Map();
+    const current = listSources(getReadDb(wikiId, root, sourceStateDbPath(root)));
+    const busy = this.isBuildBusy(row) && row.internal_status !== "syncing-documents";
+    const task = this.readSelectionTask(root);
+    const selected = busy && task && !task.completed ? new Set(task.scope.filenames) : null;
+    const processing = new Set(busy ? readAnalysisProgress(root)?.current_files ?? [] : []);
+    const items: WikiDocument[] = current.map((file) => {
+      const old = baseline.get(file.filename);
+      const completed = old?.status === "ingested" && old.sha256 === file.sha256;
+      const failed = file.status === "failed" || (old?.status === "failed" && old.sha256 === file.sha256);
+      const status: WikiDocument['status'] = processing.has(file.filename) || (selected?.has(file.filename) && (!completed || task?.scope.force)) ? "processing"
+        : failed ? "failed" : completed ? "completed" : old ? "changed" : "pending";
+      return { filename: file.filename, size: file.size, status, error: failed ? file.ingest_error ?? old?.ingest_error : null };
+    });
+    const names = new Set(current.map((file) => file.filename));
+    for (const [filename, old] of baseline) if (!names.has(filename)) items.push({ filename, size: old.size, status: "deleted" });
+    return { items: items.sort((a, b) => a.filename.localeCompare(b.filename)), total: current.length,
+      completed: current.filter((s) => baseline.get(s.filename)?.status === "ingested" && baseline.get(s.filename)?.sha256 === s.sha256).length,
+      deleted: items.filter((s) => s.status === "deleted").length };
+  }
+
+  /** 入队前保存完整原文快照和选择范围，后续上传不会改变本批输入。 */
+  analyzeSelected(serviceId: string, teamId: string, wikiId: string, request: WikiSelectionRequest, requesterUserId?: string): IngestResult {
+    const row = this.store.getWiki(serviceId, teamId, wikiId);
+    if (!row) return { kind: "not_found" };
+    if (row.ingest_status === "pending" || row.ingest_status === "processing") return { kind: "busy", status: row.ingest_status, step: row.internal_status };
+    if (row.source_type === "git" && row.sync_error?.startsWith("document sync")) throw new Error("document sync did not complete; sync documents again before analysis");
+    const documents = this.documents(serviceId, wikiId)!;
+    const available = new Map(documents.items.map((file) => [file.filename, file]));
+    const filenames = [...new Set(request.filenames)];
+    const deleted = [...new Set(request.deleted_filenames ?? [])];
+    const rawRoot = resolve(this.dirFor(serviceId, teamId, wikiId), "raw", "sources");
+    for (const filename of [...filenames, ...deleted]) {
+      if (!resolve(rawRoot, filename).startsWith(rawRoot + sep) || filename.replace(/\\/g, "/").split("/").some((part) => part === ".." || part === ".")) {
+        throw new Error(`invalid document path: ${filename}`);
+      }
+    }
+    if (filenames.length + deleted.length === 0) throw new Error("select at least one document");
+    for (const filename of filenames) if (!available.has(filename) || available.get(filename)?.status === "deleted") throw new Error(`source document not found: ${filename}`);
+    for (const filename of filenames) {
+      const path = resolve(rawRoot, filename);
+      if (!existsSync(path) || !lstatSync(path).isFile()) throw new Error(`source document not found: ${filename}`);
+      if (!/\.(md|txt|markdown)$/i.test(filename)) throw new Error(`unsupported document type: ${filename}`);
+    }
+    for (const filename of deleted) if (available.get(filename)?.status !== "deleted") throw new Error(`document is not pending deletion: ${filename}`);
+    if (!request.force && deleted.length === 0 && filenames.every((name) => available.get(name)?.status === "completed")) return { kind: "ok", row };
+    const root = this.dirFor(serviceId, teamId, wikiId);
+    const id = randomUUID();
+    const snapshot = join(root, "analysis-tasks", id, "sources");
+    cpSync(join(root, "raw", "sources"), snapshot, { recursive: true });
+    const git = row.source_type === "git" ? readWikiGitMetadata(row.metadata_json) : null;
+    let provenance: WikiGitProvenance | undefined;
+    if (git) {
+      try { provenance = JSON.parse(readFileSync(join(snapshot, ".git-source.json"), "utf8")) as WikiGitProvenance; }
+      catch { if (git.last_sync) provenance = { repo_url: git.repo_url, branch: git.branch, docs_path: git.docs_path, commit_hash: git.last_sync.commit_hash }; }
+    }
+    const task: SelectionTask = { scope: { task_id: id, filenames, deleted_filenames: deleted, force: request.force ?? false,
+      retry_filenames: filenames.filter((filename) => available.get(filename)?.status === "failed") },
+      snapshot, base_version: row.active_version, completed: false,
+      ...(provenance ? { git_source: provenance } : {}) };
+    atomicWriteJson(join(root, "selection-task.json"), task);
+    return this.ingest(serviceId, teamId, wikiId, requesterUserId, false, task);
   }
 
   analysisProgress(serviceId: string, wikiId: string) {
     const row = this.store.getWikiById(serviceId, wikiId);
     return row ? readAnalysisProgress(this.dirFor(serviceId, row.team_id, wikiId)) : null;
+  }
+
+  canResumeSelection(serviceId: string, wikiId: string): boolean {
+    const row = this.store.getWikiById(serviceId, wikiId);
+    if (!row) return false;
+    const task = this.readSelectionTask(this.dirFor(serviceId, row.team_id, wikiId));
+    return !!task && !task.completed && task.base_version === row.active_version;
   }
 
   listVersions(serviceId: string, wikiId: string): WikiVersionItem[] | null {
@@ -1171,7 +1291,7 @@ export class WikiService {
   // ═══════════════════════════════════════════════════════════════════
 
   /** 完整校验后的 Git 快照替换原文目录，并以生效版本状态登记源文件。 */
-  private replaceGitSources(root: string, files: WikiGitFile[], baseline: Map<string, { sha256: string; status: SourceStatus }>, userId?: string): void {
+  private replaceGitSources(root: string, files: WikiGitFile[], baseline: Map<string, { sha256: string; status: SourceStatus }>, userId?: string, provenance?: WikiGitProvenance): void {
     const rawRoot = resolve(root, "raw");
     const sources = resolve(rawRoot, "sources");
     const staging = resolve(rawRoot, `git-staging-${randomUUID()}`);
@@ -1192,6 +1312,7 @@ export class WikiService {
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, file.content, "utf-8");
       }
+      if (provenance) atomicWriteJson(join(staging, ".git-source.json"), provenance);
       if (existsSync(sources)) { renameSync(sources, backup); moved = true; }
       renameSync(staging, sources);
       const sourceIndex = sourceStateDbPath(root);
@@ -1205,6 +1326,7 @@ export class WikiService {
           const old = baseline.get(file.filename);
           const current = existing.get(file.filename);
           if (old?.status === "ingested" && old.sha256 === file.sha256
+              && !(current?.sha256 === file.sha256 && current.status === "failed")
               && (current?.sha256 !== file.sha256 || current.status !== "ingested")) {
             recordSourceIngestResult(db, { ...file, ok: true });
           }
@@ -1224,11 +1346,11 @@ export class WikiService {
     }
   }
 
-  private enqueueBuild(row: WikiRow, requesterUserId?: string, resume = false): void {
-    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, row.version, requesterUserId, resume));
+  private enqueueBuild(row: WikiRow, requesterUserId?: string, resume = false, task?: SelectionTask, syncOnly = false): void {
+    this.queue.enqueue(row.wiki_id, () => this.runBuild(row.service_id, row.wiki_id, row.team_id, row.name, row.version, requesterUserId, resume, task, syncOnly));
   }
 
-  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string, version: number, requesterUserId?: string, resume = false): Promise<void> {
+  private async runBuild(serviceId: string, wikiId: string, teamId: string, name: string, version: number, requesterUserId?: string, resume = false, task?: SelectionTask, syncOnly = false): Promise<void> {
     // 入口检查点：pending 期间被删 → 跳过，不置 processing、不 ingest。
     if (this.isDeleted(serviceId, wikiId)) {
       this.finishCancelled(serviceId, teamId, wikiId);
@@ -1239,6 +1361,7 @@ export class WikiService {
     const signal = controller.signal;
     const root = this.dirFor(serviceId, teamId, wikiId);
     let sourceSnapshot: string | undefined;
+    let analysisScope = task?.scope;
     const hasActiveVersion = before?.active_version != null;
     let gitMetadata = before?.source_type === "git" ? readWikiGitMetadata(before.metadata_json) : null;
     let gitSource: WikiGitProvenance | undefined;
@@ -1248,14 +1371,20 @@ export class WikiService {
       status: hasActiveVersion ? "ready" : "processing",
       ingest_status: "processing",
       building_version: before?.source_type === "git" ? null : version,
-      internal_status: before?.source_type === "git" ? "fetching" : "scanning",
+      internal_status: syncOnly ? "syncing-documents" : before?.source_type === "git" && !task ? "fetching" : "scanning",
       sync_error: null,
     });
     // 进度/终态 callback 共用同一代际，Panel 可拒绝 clear 后的迟到 progress
     const ingestRunId = randomUUID();
     try {
       signal.throwIfAborted();
-      if (before?.source_type === "git") {
+      if (task) {
+        sourceSnapshot = task.snapshot;
+        gitSource = task.git_source;
+        const active = getActiveVersion(root);
+        sourceBaseline = active ? readSourceStates(getReadDb(wikiId, root, join(root, active.index_file))) : new Map();
+        this.store.updateWikiStatus(serviceId, wikiId, { building_version: version });
+      } else if (before?.source_type === "git") {
         if (!gitMetadata) throw new Error("Git source configuration is missing");
         const active = getActiveVersion(root);
         sourceBaseline = active
@@ -1274,11 +1403,17 @@ export class WikiService {
         gitMetadata = { ...gitMetadata, last_sync: compareWikiGitFiles(snapshot.files, sourceBaseline, gitSource.commit_hash) };
         hasGitReport = true;
         this.store.updateWikiStatus(serviceId, wikiId, {
-          internal_status: "scanning",
+          internal_status: syncOnly ? "syncing-documents" : "scanning",
           metadata_json: writeWikiGitMetadata(before.metadata_json, gitMetadata),
         });
-        this.replaceGitSources(root, snapshot.files, sourceBaseline, requesterUserId ?? before.user_id ?? undefined);
-        if (gitMetadata.last_sync!.no_changes && active) {
+        this.replaceGitSources(root, snapshot.files, sourceBaseline, requesterUserId ?? before.user_id ?? undefined, gitSource);
+        if (syncOnly) {
+          this.store.updateWikiStatus(serviceId, wikiId, { status: hasActiveVersion ? "ready" : "draft", ingest_status: "idle",
+            building_version: null, internal_status: null, sync_error: null });
+          return;
+        }
+        analysisScope = previous?.analysis_scope ?? { task_id: ingestRunId, filenames: snapshot.files.map((file) => file.filename), deleted_filenames: [], force: false };
+        if (gitMetadata.last_sync!.added + gitMetadata.last_sync!.modified + gitMetadata.last_sync!.retried === 0 && active) {
           this.store.updateWikiStatus(serviceId, wikiId, {
             status: "ready", ingest_status: "idle", building_version: null, internal_status: null,
             sync_error: null, last_sync_at: gitMetadata.last_sync!.checked_at,
@@ -1309,19 +1444,21 @@ export class WikiService {
         sourceSnapshot,
         signal,
         setProgress: (progress) => saveAnalysisProgress(root, version, progress),
+        analysisScope,
       });
       // 结束前检查点：processing 期间被删 → 跳过 ready/audit/回调，幂等收尾清理。
       if (this.isDeleted(serviceId, wikiId)) {
         this.finishCancelled(serviceId, teamId, wikiId);
         return;
       }
-      if (gitMetadata && gitSource) {
+      if (gitMetadata && gitSource && !task) {
         const failures = (this.rawLs(serviceId, teamId, wikiId) ?? [])
           .filter((file) => file.status === "failed")
           .map((file) => ({ filename: file.filename, error: file.ingest_error ?? "analysis failed" }));
         gitMetadata = { ...gitMetadata, commit_hash: gitSource.commit_hash,
           last_sync: { ...gitMetadata.last_sync!, failed: failures.length, failures } };
       }
+      if (gitMetadata && gitSource && task) gitMetadata = { ...gitMetadata, commit_hash: gitSource.commit_hash };
       this.store.updateWikiStatus(serviceId, wikiId, {
         ...(gitMetadata ? { metadata_json: writeWikiGitMetadata(before!.metadata_json, gitMetadata) } : {}),
         status: "ready",
@@ -1335,6 +1472,7 @@ export class WikiService {
         last_sync_at: new Date().toISOString(),
       });
       const synced = this.store.getWikiById(serviceId, wikiId);
+      if (task) atomicWriteJson(join(root, "selection-task.json"), { ...task, completed: true });
       const progress = readAnalysisProgress(root);
       if (progress?.version === version) saveAnalysisProgress(root, version, { ...progress, percent: 100, current_files: [] });
       if (synced) {
@@ -1369,16 +1507,17 @@ export class WikiService {
         this.store.updateWikiStatus(serviceId, wikiId, { metadata_json: writeWikiGitMetadata(before!.metadata_json, gitMetadata) });
       }
       this.store.updateWikiStatus(serviceId, wikiId, {
-        status: hasActiveVersion ? "ready" : "failed",
-        ingest_status: "failed",
+        status: hasActiveVersion ? "ready" : syncOnly ? "draft" : "failed",
+        ingest_status: syncOnly ? "idle" : "failed",
         building_version: null,
         internal_status: null,
-        sync_error: msg.slice(0, 500),
+        sync_error: (syncOnly ? `document sync failed: ${msg}` : msg).slice(0, 500),
       });
       const failed = this.store.getWikiById(serviceId, wikiId);
       if (failed) this.audit(failed, "failed", msg.slice(0, 500));
       this.logger?.warn?.(`[wiki] ${wikiId} failed: ${msg}`);
 
+      if (syncOnly) return;
       // Callback TMC about failure
       await this.onBuildComplete(failed, hasActiveVersion ? "ready" : "failed", msg, ingestRunId);
     } finally {

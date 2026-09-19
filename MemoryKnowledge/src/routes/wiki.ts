@@ -65,7 +65,10 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
 
     const row = wikiService.getById(serviceId, wikiId);
     if (!row) return c.json(wrapError(404, "wiki not found"), 404);
-    return c.json(wrapOk({ ...toWikiDetail(row), analysis: wikiService.analysisProgress(serviceId, wikiId) }));
+    const documents = wikiService.documents(serviceId, wikiId);
+    return c.json(wrapOk({ ...toWikiDetail(row), analysis: wikiService.analysisProgress(serviceId, wikiId),
+      selection_resumable: wikiService.canResumeSelection(serviceId, wikiId),
+      document_summary: documents ? { total: documents.total, completed: documents.completed, deleted: documents.deleted } : null }));
   });
 
   for (const path of ["/ingest", "/sync", "/resume"]) app.post(path, async (c) => {
@@ -85,6 +88,7 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       return c.json(wrapError(400, "wiki has no source files, upload before ingest"), 400);
     }
 
+    try {
     const result = path === "/resume"
       ? wikiService.resume(serviceId, row.team_id, wikiId, requesterUserId)
       : wikiService.ingest(serviceId, row.team_id, wikiId, requesterUserId);
@@ -94,6 +98,36 @@ export function createWikiRoutes(deps: WikiRouteDeps): Hono {
       return c.json({ code: 409, message: "busy", data: { status: result.status, step: result.step } }, 409);
     }
     return c.json(wrapOk({ wiki_id: result.row.wiki_id, status: result.row.status }), 202);
+    } catch (error) { return c.json(wrapError(400, error instanceof Error ? error.message : String(error)), 400); }
+  });
+
+  app.post("/documents", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>();
+    const serviceId = c.req.header("x-tdai-service-id");
+    if (!isValidIdSegment(serviceId) || !isValidIdSegment(body.wiki_id)) return c.json(wrapError(400, "service_id and wiki_id required"), 400);
+    const result = wikiService.documents(serviceId, body.wiki_id);
+    return result ? c.json(wrapOk(result)) : c.json(wrapError(404, "wiki not found"), 404);
+  });
+
+  for (const action of ["analyze", "sync-documents"]) app.post(`/${action}`, async (c) => {
+    const body = await c.req.json<Record<string, unknown>>();
+    const serviceId = c.req.header("x-tdai-service-id");
+    if (!isValidIdSegment(serviceId) || !isValidIdSegment(body.wiki_id)) return c.json(wrapError(400, "service_id and wiki_id required"), 400);
+    const row = wikiService.getById(serviceId, body.wiki_id);
+    if (!row) return c.json(wrapError(404, "wiki not found"), 404);
+    const userId = typeof body.user_id === "string" ? body.user_id : undefined;
+    if (action === "analyze" && (!Array.isArray(body.filenames) || !body.filenames.every((name) => typeof name === "string" && name.length > 0)
+      || (body.deleted_filenames !== undefined && (!Array.isArray(body.deleted_filenames) || !body.deleted_filenames.every((name) => typeof name === "string" && name.length > 0)))
+      || (body.force !== undefined && typeof body.force !== "boolean"))) return c.json(wrapError(400, "invalid analysis selection"), 400);
+    try {
+      const result = action === "sync-documents" ? wikiService.syncDocuments(serviceId, row.team_id, row.wiki_id, userId)
+        : wikiService.analyzeSelected(serviceId, row.team_id, row.wiki_id, {
+          filenames: body.filenames as string[], deleted_filenames: body.deleted_filenames as string[] | undefined, force: body.force as boolean | undefined,
+        }, userId);
+      if (result.kind === "not_found") return c.json(wrapError(404, "wiki not found"), 404);
+      if (result.kind === "busy") return c.json({ code: 409, message: "busy", data: result }, 409);
+      return c.json(wrapOk({ wiki_id: row.wiki_id, status: result.row.status, ingest_status: result.row.ingest_status }), 202);
+    } catch (error) { return c.json(wrapError(400, error instanceof Error ? error.message : String(error)), 400); }
   });
 
   app.post("/pause", async (c) => {

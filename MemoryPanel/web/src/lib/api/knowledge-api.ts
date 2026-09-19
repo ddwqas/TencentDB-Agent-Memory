@@ -100,6 +100,8 @@ export interface WikiCreateSource {
 }
 
 export interface WikiAnalysisProgress {
+  selected_count?: number;
+  cleanup_count?: number;
   phase: 'extracting' | 'merging' | 'indexing';
   total: number;
   completed: number;
@@ -112,7 +114,29 @@ export interface WikiAnalysisProgress {
   updated_at?: string;
 }
 
+export interface WikiDocument {
+  filename: string;
+  size: number;
+  status: 'pending' | 'changed' | 'processing' | 'completed' | 'failed' | 'deleted';
+  error?: string | null;
+}
+
+export interface WikiDocumentList {
+  items: WikiDocument[];
+  total: number;
+  completed: number;
+  deleted: number;
+}
+
+export interface WikiSelectionRequest {
+  filenames: string[];
+  deleted_filenames?: string[];
+  force?: boolean;
+}
+
 export interface WikiDetail {
+  selection_resumable?: boolean;
+  document_summary?: { total: number; completed: number; deleted: number } | null;
   analysis?: WikiAnalysisProgress | null;
   progress?: WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
@@ -202,7 +226,7 @@ export interface IngestProgressEvent {
 export interface IngestStreamCallbacks {
   onPaused?: () => void;
   onProgress?: (event: IngestProgressEvent) => void;
-  onComplete?: (result: { total: number; ingested: number; git?: WikiGitState | null }) => void;
+  onComplete?: (result: { total: number; ingested: number; git?: WikiGitState | null; analysis?: WikiAnalysisProgress | null }) => void;
   onError?: (error: string) => void;
 }
 
@@ -215,6 +239,8 @@ export interface WikiPage { path: string; title: string; type: string; tags?: st
 
 /** meta + KS join 后的列表项（team-assets） */
 export interface KnowledgeAssetItem {
+  selection_resumable?: boolean;
+  document_summary?: { total: number; completed: number; deleted: number } | null;
   analysis?: WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
   git?: WikiGitState | null;
@@ -247,6 +273,8 @@ export interface KnowledgeAssetItem {
 
 function assetItemToWiki(item: KnowledgeAssetItem): WikiDetail {
   return {
+    selection_resumable: item.selection_resumable,
+    document_summary: item.document_summary,
     analysis: item.analysis,
     source_type: item.source_type ?? 'upload',
     git: item.git ?? null,
@@ -328,6 +356,7 @@ export function wikiStageLabel(status: WikiDetail['status'], internalStatus?: st
   if (status === 'failed') return i18n.t('wiki.status.failed');
   if (status === 'draft') return i18n.t('wiki.status.draft');
   const map: Record<string, string> = {
+    'syncing-documents': i18n.t('wiki.documents.syncStarted'),
     pausing: i18n.t('wiki.analysis.pausing'),
     fetching: i18n.t('wiki.git.fetching'),
     scanning: i18n.t('knowledgeApi.stage.scanning'),
@@ -377,6 +406,9 @@ export const knowledgeApi = {
   // ---- Wiki ----
 
   wiki: {
+    documents: (wikiId: string): Promise<WikiDocumentList> => panelPost('/wiki/documents', { wiki_id: wikiId }),
+    analyze: (wikiId: string, selection: WikiSelectionRequest): Promise<void> => panelPost('/wiki/analyze', { wiki_id: wikiId, ...selection }),
+    syncDocuments: (wikiId: string): Promise<void> => panelPost('/wiki/sync-documents', { wiki_id: wikiId }),
     /** 创建 wiki。返回 WikiDetail（含 wiki_id） */
     create: (teamId: string, name: string, source?: WikiCreateSource): Promise<WikiDetail> =>
       panelPost('/wiki/create', { team_id: teamId, name, ...source }),
@@ -413,8 +445,27 @@ export const knowledgeApi = {
         callbacks.onProgress?.({ type: 'file_start', detail: i18n.t('knowledgeApi.ingest.triggering'), done: 0, total: 100, ts: Date.now() });
         try {
           if (resume) await knowledgeApi.wiki.resume(wikiId);
-          else if (syncGit) await knowledgeApi.wiki.sync(wikiId);
-          else await knowledgeApi.wiki.ingest(wikiId);
+          else {
+            if (syncGit) {
+              await knowledgeApi.wiki.syncDocuments(wikiId);
+              while (!signal?.aborted) {
+                await new Promise(r => setTimeout(r, 1000));
+                const synced = await knowledgeApi.wiki.get(wikiId);
+                if (synced.ingest_status === 'paused') { callbacks.onPaused?.(); return; }
+                if (synced.ingest_status === 'failed' || synced.sync_error) throw new Error(synced.sync_error ?? i18n.t('knowledgeApi.ingest.failed'));
+                if (synced.ingest_status === 'idle') break;
+              }
+            }
+            if (signal?.aborted) return;
+            const documents = await knowledgeApi.wiki.documents(wikiId);
+            const filenames = documents.items.filter((file) => ['pending', 'changed', 'failed'].includes(file.status)).map((file) => file.filename);
+            if (!filenames.length) {
+              const current = await knowledgeApi.wiki.get(wikiId);
+              callbacks.onComplete?.({ total: 0, ingested: 0, git: current.git });
+              return;
+            }
+            await knowledgeApi.wiki.analyze(wikiId, { filenames });
+          }
         } catch (err: unknown) {
           // 已经在 pending/processing 时，KS 会返回 409 busy；前端继续轮询现有任务。
           if (!(err instanceof KnowledgeApiError && err.code === 409)) throw err;
@@ -444,7 +495,7 @@ export const knowledgeApi = {
           if (detail.ingest_status === 'idle' && detail.status === 'ready') {
             callbacks.onProgress?.({ type: 'batch_done', detail: i18n.t('knowledgeApi.ingest.complete'), done: 100, total: 100, ts: Date.now() });
             const count = detail.page_count ?? 0;
-            callbacks.onComplete?.({ total: count, ingested: count, git: detail.git });
+            callbacks.onComplete?.({ total: count, ingested: count, git: detail.git, analysis: detail.analysis });
             return;
           }
           if (detail.ingest_status === 'failed' || detail.status === 'failed') {

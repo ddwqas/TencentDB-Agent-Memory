@@ -125,6 +125,8 @@ export interface SearchOptions {
 
 /** ingest 进度回调载荷（KS → Panel）。 */
 export interface IngestProgress {
+  selected_count?: number;
+  cleanup_count?: number;
   cached?: number;
   current_files?: string[];
   phase: "extracting" | "merging" | "indexing";
@@ -170,6 +172,7 @@ export function createThrottledProgressFn(
 }
 
 export interface IngestExecOptions {
+  analysisScope?: import("./analysis-scope.js").WikiAnalysisScope;
   saveProgress?: ProgressFn;
   signal?: AbortSignal;
   sourceSnapshot?: string;
@@ -618,11 +621,16 @@ export async function runIngestIncremental(
   llmConfig: any,
   onProgress?: ProgressFn,
   globalLlmLimit?: LimitFunction,
-  options?: { checkpoint?: WikiAnalysisCheckpoint; signal?: AbortSignal; saveProgress?: ProgressFn },
+  options?: { checkpoint?: WikiAnalysisCheckpoint; signal?: AbortSignal; saveProgress?: ProgressFn; analysisScope?: import("./analysis-scope.js").WikiAnalysisScope },
 ): Promise<IngestOutcome> {
   const { extractSource, commitCandidates, scanExistingPages } = await import("./ingest-v2/index.js");
   const notify = createThrottledProgressFn(onProgress);
-  const report = (progress: IngestProgress) => { options?.saveProgress?.(progress); notify?.(progress); };
+  const report = (progress: IngestProgress) => {
+    const detail = { ...progress, ...(options?.analysisScope ? {
+      selected_count: options.analysisScope.filenames.length, cleanup_count: options.analysisScope.deleted_filenames.length,
+    } : {}) };
+    options?.saveProgress?.(detail); notify?.(detail);
+  };
   const sourcesDir = join(projectPath, "raw", "sources");
   if (!existsSync(sourcesDir)) {
     log.warn("runIngest: raw/sources 不存在，跳过", { projectPath });
@@ -640,7 +648,18 @@ export async function runIngestIncremental(
     };
   });
 
-  const { toIngest, skipped, deleted } = classifySources(disk, oldStates);
+  const scope = options?.analysisScope;
+  const selected = scope ? new Set(scope.filenames) : null;
+  const scopedDisk = selected ? disk.filter((file) => selected.has(file.filename)) : disk;
+  const classification = classifySources(scopedDisk, oldStates);
+  const retry = new Set(scope?.retry_filenames ?? []);
+  const toIngest = scope?.force ? scopedDisk.map((file) => file.filename)
+    : scopedDisk.filter((file) => classification.toIngest.includes(file.filename) || retry.has(file.filename)).map((file) => file.filename);
+  const skipped = scope?.force ? [] : classification.skipped.filter((filename) => !retry.has(filename));
+  // 未选中不是删除；只清理用户明确确认且快照中已不存在的路径。
+  const diskNames = new Set(disk.map((file) => file.filename));
+  const deleted = scope ? scope.deleted_filenames.filter((name) => oldStates.has(name) && !diskNames.has(name))
+    : classification.deleted;
   const skippedCount = skipped.length;
   const toIngestSet = new Set(toIngest);
   const toIngestDisk = disk.filter((d) => toIngestSet.has(d.filename));
@@ -880,7 +899,7 @@ function findMdFiles(dir: string): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) files.push(...findMdFiles(full));
-    else if (/\.(md|txt)$/i.test(entry)) files.push(full);
+    else if (/\.(md|txt|markdown)$/i.test(entry)) files.push(full);
   }
   return files;
 }
@@ -1267,6 +1286,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
       const sourceIndex = ensureSourceState(projectPath);
       withWriteDb(projectPath, (db) => {
         for (const processed of outcome.processed) {
+          if (!existsSync(join(projectPath, "raw", "sources", processed.filename))) continue;
           const current = db.prepare("SELECT sha256 FROM source WHERE filename = ?").get(processed.filename) as
             | { sha256: string }
             | undefined;
@@ -1313,6 +1333,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
         }
       }
     } catch (err) {
+      if (baselineIndex) throw err;
       log.warn("Failed to seed candidate source metadata", { candidatePath, error: String(err) });
     }
   }
@@ -1327,13 +1348,20 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     const pages = scanWikiDir(build.versionDir);
     decorateStorageRefs(name, state.path, build.versionKey, pages);
     initIndexDb(build.versionDir);
-    const baseIndex = build.manifest.reason === "manual" && build.manifest.git_source
+    const baseIndex = build.manifest.analysis_scope || build.manifest.reason === "manual"
       ? getActiveVersion(state.path)?.index_file : undefined;
     withWriteDb(build.versionDir, (db) => {
       writeIndex(db, pages);
-      seedCandidateSources(name, state.path, build.versionDir, db, baseIndex ? join(state.path, baseIndex) : undefined);
+      if (!build.manifest.analysis_scope || baseIndex) {
+        seedCandidateSources(name, state.path, build.versionDir, db, baseIndex ? join(state.path, baseIndex) : undefined);
+      }
       if (outcome) {
         for (const processed of outcome.processed) {
+          if (build.manifest.analysis_scope) {
+            upsertSource(db, processed);
+            recordSourceIngestResult(db, processed);
+            continue;
+          }
           const current = db.prepare("SELECT sha256 FROM source WHERE filename = ?").get(processed.filename) as
             | { sha256: string }
             | undefined;
@@ -1341,7 +1369,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
           recordSourceIngestResult(db, processed);
         }
         for (const filename of outcome.deletedSources) {
-          if (!existsSync(join(state.path, "raw", "sources", filename))) deleteSources(db, [filename]);
+          if (build.manifest.analysis_scope || !existsSync(join(state.path, "raw", "sources", filename))) deleteSources(db, [filename]);
         }
       }
     });
@@ -1371,7 +1399,7 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
     const projectPath = state.path;
     const versions = listWikiVersions(projectPath);
     const version = opts?.version ?? Math.max(0, ...versions.map((item) => item.version)) + 1;
-    const build = beginWikiBuild(projectPath, version, "ingest", opts?.gitSource, opts?.sourceSnapshot);
+    const build = beginWikiBuild(projectPath, version, "ingest", opts?.gitSource, opts?.sourceSnapshot, opts?.analysisScope);
     materializeActivePages(name, projectPath, build.versionDir);
     initWikiProject(build.versionDir);
 
@@ -1395,7 +1423,9 @@ export function createWikiSourceManager(dataDir: string): WikiSourceManager {
           llmConfig,
           opts?.onProgress,
           opts?.globalLlmLimit,
-          { signal: opts?.signal, checkpoint: new WikiAnalysisCheckpoint(projectPath, build.manifest.base_version_key, llmConfig ?? {}), saveProgress: opts?.saveProgress },
+          { signal: opts?.signal, checkpoint: new WikiAnalysisCheckpoint(projectPath, build.manifest.base_version_key,
+            { ...llmConfig, ...(opts?.analysisScope && (opts.analysisScope.force || opts.analysisScope.retry_filenames?.length) ? { forceTask: opts.analysisScope.task_id } : {}) }),
+            saveProgress: opts?.saveProgress, analysisScope: opts?.analysisScope },
         );
       });
       const attempted = outcome.processed.length;

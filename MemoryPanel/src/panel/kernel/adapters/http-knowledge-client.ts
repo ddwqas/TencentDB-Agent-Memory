@@ -13,6 +13,8 @@ import { CoreUpstreamError } from '../../domain/errors.js';
 import type {
   KnowledgeClientPort,
   WikiDetail,
+  WikiDocumentList,
+  WikiSelectionRequest,
   WikiCreateSource,
   WikiListResult,
   WikiIngestResult,
@@ -179,6 +181,18 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
 
   async wikiPause(wikiId: string): Promise<WikiDetail> {
     return this.post('/v3/wiki/pause', { wiki_id: wikiId });
+  }
+
+  async wikiDocuments(wikiId: string): Promise<WikiDocumentList> {
+    return this.post('/v3/wiki/documents', { wiki_id: wikiId });
+  }
+
+  async wikiAnalyze(wikiId: string, selection: WikiSelectionRequest, userId?: string): Promise<WikiIngestResult> {
+    return this.post('/v3/wiki/analyze', { wiki_id: wikiId, ...selection, user_id: userId });
+  }
+
+  async wikiSyncDocuments(wikiId: string, userId?: string): Promise<WikiIngestResult> {
+    return this.post('/v3/wiki/sync-documents', { wiki_id: wikiId, user_id: userId });
   }
 
   async wikiResume(wikiId: string, userId?: string): Promise<WikiIngestResult> {

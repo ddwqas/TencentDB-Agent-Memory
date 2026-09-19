@@ -3,7 +3,7 @@ info:
   title: Knowledge Service API
   description: |
     Standalone knowledge service for Code-Graph + LLM-Wiki.
-    Provides 28 endpoints for managing and querying code repositories
+    Provides endpoints for managing and querying code repositories
     and wiki knowledge bases.
 
     ## Multi-tenancy (001)
@@ -339,6 +339,82 @@ paths:
         default:
           $ref: '#/components/responses/ErrorResponse'
 
+  /wiki/documents:
+    post:
+      tags: [LLM-Wiki]
+      summary: List original documents with status against the active version
+      operationId: listWikiDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WikiIngestRequest'
+      responses:
+        '200':
+          description: Document catalog and whole-Wiki completion counts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponseEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/WikiDocumentList'
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+
+  /wiki/analyze:
+    post:
+      tags: [LLM-Wiki]
+      summary: Analyze selected documents or clean explicitly confirmed deletions
+      description: |
+        Saves an immutable selection and input snapshot before enqueueing. Unselected
+        knowledge is preserved. Unchanged successful documents skip analysis unless
+        force is true. Resume retains this task's scope and completed checkpoints.
+        Only deleted_filenames are eligible for knowledge cleanup.
+      operationId: analyzeWikiDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WikiSelectionRequest'
+      responses:
+        '202':
+          description: Accepted, or unchanged selection skipped without creating a version
+        '400':
+          description: Empty or invalid selection, live deletion target, or incomplete document sync
+        '404':
+          description: Wiki not found in the current tenant
+        '409':
+          description: Another task is running
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+
+  /wiki/sync-documents:
+    post:
+      tags: [LLM-Wiki]
+      summary: Sync Git original documents without AI or knowledge publication
+      description: Refreshes intake and differences only. Never cleans deleted knowledge. Interrupted sync must be retried explicitly.
+      operationId: syncWikiDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WikiIngestRequest'
+      responses:
+        '202':
+          description: Accepted; poll wiki/get for idle and check sync_error
+        '400':
+          description: Wiki is not Git-backed
+        '409':
+          description: Another task is running
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+
   /wiki/pause:
     post:
       tags: [LLM-Wiki]
@@ -386,6 +462,7 @@ paths:
         Git Wikis fetch a fixed commit and compare tracked Markdown paths and hashes
         with the active Wiki version. Unchanged documents skip analysis; a no-op
         does not allocate a Wiki version. Upload Wikis retain normal ingest behavior.
+        Git deletions require separate confirmation through /wiki/analyze.
         Poll /wiki/get for ingest_status and git.last_sync. Git source files cannot
         be changed with raw/write or raw/rm (409).
       operationId: syncWiki
@@ -831,9 +908,72 @@ components:
 
     # ── Wiki Schemas ──
 
+    WikiSelectionRequest:
+      allOf:
+        - $ref: '#/components/schemas/WikiIngestRequest'
+        - type: object
+          required: [filenames]
+          properties:
+            filenames:
+              type: array
+              items:
+                type: string
+              description: Selected relative paths; empty only when confirming deleted_filenames
+            deleted_filenames:
+              type: array
+              items:
+                type: string
+              description: Explicitly confirmed missing source paths to clean from knowledge
+            force:
+              type: boolean
+              default: false
+              description: Reanalyze unchanged successful documents in a new task
+
+    WikiDocumentList:
+      type: object
+      required: [items, total, completed, deleted]
+      properties:
+        total:
+          type: integer
+          description: Number of current intake documents, excluding pending deletions
+        completed:
+          type: integer
+          description: Intake documents whose content matches successful active-version sources
+        deleted:
+          type: integer
+          description: Published source paths missing from intake and awaiting confirmation
+        items:
+          type: array
+          items:
+            type: object
+            required: [filename, size, status]
+            properties:
+              filename:
+                type: string
+              size:
+                type: integer
+              status:
+                type: string
+                enum: [pending, changed, processing, completed, failed, deleted]
+              error:
+                type: string
+                nullable: true
+
     WikiDetail:
       type: object
       properties:
+        selection_resumable:
+          type: boolean
+        document_summary:
+          type: object
+          nullable: true
+          properties:
+            total:
+              type: integer
+            completed:
+              type: integer
+            deleted:
+              type: integer
         ingest_status:
           type: string
           enum: [idle, pending, processing, failed, paused]
@@ -847,6 +987,12 @@ components:
               enum: [extracting, merging, indexing]
             total:
               type: integer
+            selected_count:
+              type: integer
+              description: Fixed number of selected documents in this batch
+            cleanup_count:
+              type: integer
+              description: Fixed number of explicitly confirmed deletions
             completed:
               type: integer
             failed:

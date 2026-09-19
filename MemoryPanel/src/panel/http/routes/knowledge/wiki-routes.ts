@@ -115,7 +115,24 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
     return runKs(c, () => path.endsWith('/sync') ? kc.wikiSync(wikiId, gate.userId) : kc.wikiIngest(wikiId));
   });
 
-  // W3 get — id-only（需 read 权限）；聚合 Panel 内存 ingest progress（不新增接口）
+  // 文档列表和选择分析使用同一资产权限门控。
+  for (const action of ['documents', 'analyze', 'sync-documents'] as const) api.post(`/knowledge/wiki/${action}`, mw, async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const wikiId = str(body, 'wiki_id');
+    if (!wikiId) return respondControlError(c, 400, 'MISSING_WIKI_ID');
+    const gate = await requireKnowledgeRead(deps, c, ctx, wikiId, { action: action === 'documents' ? 'read' : 'write' });
+    if ('error' in gate) return gate.error;
+    const kc = deps.knowledgeClientFactory(ctx.instanceId);
+    if (action === 'documents') return runKs(c, () => kc.wikiDocuments(wikiId));
+    if (action === 'sync-documents') return runKs(c, () => kc.wikiSyncDocuments(wikiId, gate.userId));
+    if (!Array.isArray(body.filenames) || !body.filenames.every((name) => typeof name === 'string' && name.length > 0)
+      || (body.deleted_filenames !== undefined && (!Array.isArray(body.deleted_filenames) || !body.deleted_filenames.every((name) => typeof name === 'string' && name.length > 0)))
+      || (body.force !== undefined && typeof body.force !== 'boolean')) return respondControlError(c, 400, 'INVALID_ANALYSIS_SELECTION');
+    return runKs(c, () => kc.wikiAnalyze(wikiId, { filenames: body.filenames as string[], deleted_filenames: body.deleted_filenames as string[] | undefined, force: body.force as boolean | undefined }, gate.userId));
+  });
+
+  // W3 get — 聚合持久化分析进度。
   for (const action of ['pause', 'resume'] as const) api.post(`/knowledge/wiki/${action}`, mw, async (c) => {
     const ctx = buildCtx(c);
     const body = await readJson(c);

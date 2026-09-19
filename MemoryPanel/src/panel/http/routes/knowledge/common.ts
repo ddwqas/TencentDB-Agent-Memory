@@ -374,6 +374,8 @@ export async function requireKnowledgeRead(
 }
 
 export interface KnowledgeAssetListItem {
+  selection_resumable?: boolean;
+  document_summary?: { total: number; completed: number; deleted: number } | null;
   analysis?: import('../../../kernel/ports/knowledge-client-port.js').WikiAnalysisProgress | null;
   source_type?: 'upload' | 'git';
   git?: import('../../../kernel/ports/knowledge-client-port.js').WikiGitState | null;
@@ -427,6 +429,8 @@ async function joinWikiKs(
       ...base,
       source_type: ks.source_type,
       analysis: ks.analysis,
+      selection_resumable: ks.selection_resumable,
+      document_summary: ks.document_summary,
       git: ks.git,
       team_id: ks.team_id,
       status: ks.status,

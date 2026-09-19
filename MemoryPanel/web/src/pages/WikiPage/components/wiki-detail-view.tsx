@@ -24,6 +24,7 @@ import { WIKI_ALLOWED_FILE_RE, TYPE_COLORS, TYPE_COLOR_FALLBACK, type DetailTab 
 import { WikiStatusBadge } from './wiki-ui';
 import { GraphTabContent, PagesTabContent } from './wiki-detail-components';
 import { WikiAnalysisProgress } from './WikiAnalysisProgress';
+import { WikiDocumentsPanel } from './WikiDocumentsPanel';
 import type { WikiSourcesStore } from '../hooks/useWikiSources';
 
 export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
@@ -153,7 +154,8 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
               <Button type="text" onClick={openVersions}>
                 <History size={14} /> {t('wiki.version.history')}
               </Button>
-              {(source.ingest_status === 'pending' || source.ingest_status === 'processing') && source.internal_status !== 'publishing-manual-version' && <Button
+              <Button onClick={() => setActiveTab('documents')}>{t('wiki.documents.title')}</Button>
+              {(source.ingest_status === 'pending' || source.ingest_status === 'processing') && !['publishing-manual-version', 'syncing-documents'].includes(source.internal_status ?? '') && <Button
                 onClick={() => handlePause(selectedWikiId)}
                 disabled={source.internal_status === 'pausing'}
               >{t(source.internal_status === 'pausing' ? 'wiki.analysis.pausing' : 'wiki.analysis.pause')}</Button>}
@@ -171,7 +173,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
               </Button>}
               <Button
                 type="primary"
-                onClick={() => handleIngest(selectedWikiId, source.ingest_status === 'paused' || source.ingest_status === 'failed')}
+                onClick={() => handleIngest(selectedWikiId, source.selection_resumable || source.ingest_status === 'paused' || source.ingest_status === 'failed')}
                 disabled={ingestBusy}
                 loading={analyzing}
               >
@@ -179,7 +181,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
                   t('wiki.detail.processing')
                 ) : (
                   <>
-                    <StarIcon size={14} /> {t(source.ingest_status === 'paused' || source.ingest_status === 'failed'
+                    <StarIcon size={14} /> {t(source.selection_resumable || source.ingest_status === 'paused' || source.ingest_status === 'failed'
                       ? 'wiki.analysis.resume' : source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
                   </>
                 )}
@@ -236,6 +238,7 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
         disableTabScrolling
         className="_wiki-detail-tabs"
         tabs={[
+          { id: 'documents', label: t('wiki.documents.title') },
           {
             id: 'overview',
             label: (
@@ -274,6 +277,11 @@ export function WikiDetailView({ store }: { store: WikiSourcesStore }) {
           },
         ]}
       >
+        <TabPanel id="documents">
+          <WikiDocumentsPanel key={selectedWikiId} wiki={source} refreshKey={rawRefreshKey}
+            active={activeTab === 'documents'}
+            onChanged={() => { void store.fetchDetail(selectedWikiId); }} />
+        </TabPanel>
         <TabPanel id="overview">
           <div className="_wiki-detail-overview">
             <div className="_wiki-detail-overview-stats">

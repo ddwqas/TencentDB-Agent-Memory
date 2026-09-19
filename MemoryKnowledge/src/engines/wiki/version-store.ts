@@ -24,6 +24,7 @@ import type { WikiGitProvenance } from "../../source-fetcher/wiki-git-source.js"
 export type WikiVersionState = "building" | "published" | "failed" | "paused";
 
 export interface WikiVersionManifest {
+  analysis_scope?: import("./analysis-scope.js").WikiAnalysisScope;
   schema_version: 1;
   version: number;
   version_key: string;
@@ -157,6 +158,7 @@ export function beginWikiBuild(
   reason: WikiVersionManifest["reason"] = "ingest",
   gitSource?: WikiGitProvenance,
   sourceSnapshot?: string,
+  analysisScope?: import("./analysis-scope.js").WikiAnalysisScope,
 ): WikiBuildGeneration {
   mkdirSync(join(root, "pages"), { recursive: true });
   const active = getActiveVersion(root);
@@ -181,6 +183,7 @@ export function beginWikiBuild(
 
   const createdAt = new Date().toISOString();
   const manifest: WikiVersionManifest = {
+    ...(analysisScope ? { analysis_scope: analysisScope } : {}),
     ...((gitSource ?? inheritedSource) ? { git_source: gitSource ?? inheritedSource } : {}),
     schema_version: 1,
     version,

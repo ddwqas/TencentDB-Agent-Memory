@@ -47,9 +47,9 @@ export function WikiActions({
   const { t } = useTranslation();
   return (
     <div className="_asset-wiki-actions" onClick={(event) => event.stopPropagation()}>
-      <Button type="weak" disabled={ingestBusy} onClick={() => onIngest(source.wiki_id, source.ingest_status === 'paused' || source.ingest_status === 'failed')}>
+      <Button type="weak" disabled={ingestBusy} onClick={() => onIngest(source.wiki_id, source.selection_resumable || source.ingest_status === 'paused' || source.ingest_status === 'failed')}>
         <StarIcon size={14} /> {isCurrentIngesting ? t('wiki.action.ingestBusy') : ingestBusy ? t('wiki.action.queuing')
-          : t(source.ingest_status === 'paused' || source.ingest_status === 'failed' ? 'wiki.analysis.resume' : source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
+          : t(source.selection_resumable || source.ingest_status === 'paused' || source.ingest_status === 'failed' ? 'wiki.analysis.resume' : source.source_type === 'git' ? 'wiki.git.sync' : 'wiki.action.ingest')}
       </Button>
       {scopeTab === 'fixed' ? (
         <Button type="weak" onClick={() => onUnbind(source.wiki_id)}>

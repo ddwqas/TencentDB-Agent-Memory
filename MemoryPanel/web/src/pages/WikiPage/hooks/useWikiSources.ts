@@ -410,6 +410,7 @@ export function useWikiSources() {
       return;
     }
     const wiki = sources.find((s) => s.wiki_id === wikiId);
+    if (!resume && wiki?.selection_resumable && !await tea.confirm({ message: t('wiki.documents.replaceTask') })) return;
     const name = wiki?.name ?? wikiId;
     ingestPollRef.current?.abort();
     const observer = new AbortController();
@@ -467,7 +468,7 @@ export function useWikiSources() {
         },
         onComplete: (result) => {
           const report = result.git?.last_sync;
-          const detail = report
+          const detail = result.analysis ? t('wiki.analysis.progress', { ...result.analysis, cached: result.analysis.cached ?? 0 }) : result.total === 0 ? t('wiki.documents.noPending') : report
             ? report.no_changes ? t('wiki.git.unchanged') : t('wiki.git.completed', { ...report })
             : t('wiki.ingest.done', { count: result.ingested });
           setIngestState((prev) => ({
@@ -479,7 +480,7 @@ export function useWikiSources() {
             currentFile: '',
             log: report?.failures.map((file) => ({ file: file.filename, status: 'error' as const, error: file.error })) ?? prev.log,
           }));
-          if (report?.failed) tea.notify.warning(detail);
+          if (result.analysis?.failed || (!result.analysis && report?.failed)) tea.notify.warning(detail);
           else tea.notify.success(report ? detail : t('wiki.notify.ingestComplete', { count: result.ingested }));
           fetchSources();
           fetchDetail(wikiId);
@@ -638,18 +639,18 @@ export function useWikiSources() {
   };
 
   /**
-   * 上传只写入原始文档，不会自动触发知识抽取；成功后立即给出明确的下一步操作，
-   * 避免用户不知道还需要点击"开始抽取"。
+   * 上传后引导用户选择原文范围，分析由原始文档页单独提交。
    */
   const offerIngestAfterUpload = async (wikiId: string, uploadedCount: number) => {
-    const shouldIngest = await tea.confirm({
+    const shouldSelect = await tea.confirm({
       message: t('wiki.detail.uploaded', { count: uploadedCount }),
       description: t('wiki.detail.uploaded.desc'),
       okText: t('wiki.detail.uploaded.ok'),
       cancelText: t('wiki.detail.uploaded.cancel'),
     });
-    if (shouldIngest) {
-      void handleIngest(wikiId);
+    if (shouldSelect) {
+      setSelectedWikiId(wikiId);
+      setActiveTab('documents');
     } else {
       tea.notify.info(t('wiki.detail.uploaded.later'));
     }

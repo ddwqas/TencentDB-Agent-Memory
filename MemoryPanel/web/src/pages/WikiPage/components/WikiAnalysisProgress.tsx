@@ -5,15 +5,16 @@ import { wikiStageLabel, type WikiDetail } from '@/lib/api/knowledge-api';
 
 export function WikiAnalysisProgress({ wiki, compact = false }: { wiki: WikiDetail; compact?: boolean }) {
   const { t } = useTranslation();
-  const analysis = wiki.analysis ?? wiki.progress;
+  const syncing = wiki.internal_status === 'syncing-documents';
+  const analysis = syncing ? null : wiki.analysis ?? wiki.progress;
   const running = wiki.ingest_status === 'pending' || wiki.ingest_status === 'processing';
-  const paused = wiki.ingest_status === 'paused';
+  const paused = wiki.ingest_status === 'paused' || (wiki.ingest_status === 'idle' && wiki.selection_resumable);
   const failed = wiki.ingest_status === 'failed';
   if (!analysis && !running && !paused && !failed) return null;
 
   const stage = paused ? t('wiki.analysis.paused') : failed ? t('wiki.analysis.failedState')
     : !running ? t('wiki.analysis.complete')
-      : wiki.internal_status === 'fetching' || wiki.internal_status === 'pausing'
+      : syncing || wiki.internal_status === 'fetching' || wiki.internal_status === 'pausing'
         ? wikiStageLabel('processing', wiki.internal_status)
         : analysis ? t(`wiki.analysis.phase.${analysis.phase}`) : t('wiki.analysis.waitingProgress');
   const done = analysis ? analysis.completed + analysis.failed : 0;
@@ -30,9 +31,11 @@ export function WikiAnalysisProgress({ wiki, compact = false }: { wiki: WikiDeta
 
   return (
     <section className={`_wiki-analysis-progress${compact ? ' _wiki-analysis-progress--compact' : ''}`} aria-label={t('wiki.analysis.progressTitle')}>
+      {wiki.document_summary && <strong>{t('wiki.documents.overall', { ...wiki.document_summary })}</strong>}
+      {analysis?.selected_count !== undefined && <span>{t('wiki.documents.batchSelection', { count: analysis.selected_count, cleanup: analysis.cleanup_count ?? 0 })}</span>}
       <div className="_wiki-analysis-progress-heading">
         <span>{stage}</span>
-        {analysis && <strong>{t('wiki.analysis.documentCount', { done, total: analysis.total })}</strong>}
+        {analysis && <strong>{t('wiki.documents.batch', { done, total: analysis.total })}</strong>}
       </div>
       {analysis ? <>
         <Progress percent={Number(percent.toFixed(2))} />

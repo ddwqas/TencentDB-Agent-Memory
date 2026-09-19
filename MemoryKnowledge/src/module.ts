@@ -244,7 +244,7 @@ export function createKnowledgeModule(config: KnowledgeModuleConfig): KnowledgeM
       },
       { onProgress, saveProgress: ctx.setProgress,
         globalLlmLimit, version, gitSource: ctx.gitSource, sourceBaseline: ctx.sourceBaseline,
-        signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot },
+        signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot, analysisScope: ctx.analysisScope },
     );
     setInternalStatus("rebuilding-index");
 

@@ -79,6 +79,7 @@ async function fixture(initial: Record<string, string> = { "docs/a/README.md": "
       await manager.ingest(ctx.wikiId, {}, {
         version: ctx.version, gitSource: ctx.gitSource, sourceBaseline: ctx.sourceBaseline,
         signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot, saveProgress: ctx.setProgress,
+        analysisScope: ctx.analysisScope,
       });
       return { pageCount: manager.getPages(ctx.wikiId).length };
     },
@@ -130,7 +131,8 @@ describe("Wiki Git source", () => {
     await f.sync();
     expect(f.current().active_version).toBe(2);
     expect(f.metadata().last_sync).toMatchObject({ added: 1, modified: 1, deleted: 1 });
-    expect(f.manager.getPages(f.wikiId).some((page) => page.title === "b/README.md")).toBe(false);
+    expect(f.manager.getPages(f.wikiId).some((page) => page.title === "b/README.md")).toBe(true);
+    expect(f.service.documents("service", f.wikiId)?.deleted).toBe(1);
     expect(f.manager.getPages(f.wikiId).some((page) => page.title === "b/renamed.md")).toBe(true);
 
     expect(f.service.rollback("service", f.wikiId, 1, 2).kind).toBe("ok");
@@ -184,6 +186,8 @@ describe("Wiki Git source", () => {
     rmSync(join(f.repo, "docs/a/README.md"));
     await f.commit();
     await f.sync();
+    f.service.analyzeSelected("service", "team", f.wikiId, { filenames: [], deleted_filenames: ["a/README.md"] });
+    await f.service.onIdle(f.wikiId);
     const shared = f.manager.readPage(f.wikiId, "concepts/shared")!;
     expect(parseFrontmatter(shared).frontmatter.sources).toEqual(["b/README.md"]);
     expect(shared).not.toContain(`[[${aRef}]]`);
@@ -192,6 +196,8 @@ describe("Wiki Git source", () => {
     f.put("README.txt", "repository without Markdown");
     await f.commit();
     await f.sync();
+    f.service.analyzeSelected("service", "team", f.wikiId, { filenames: [], deleted_filenames: ["b/README.md"] });
+    await f.service.onIdle(f.wikiId);
     expect(f.current().ingest_status).toBe("idle");
     expect(f.service.rawLs("service", "team", f.wikiId)).toEqual([]);
     expect(f.manager.readPage(f.wikiId, "concepts/shared")).toBeNull();
@@ -272,6 +278,149 @@ describe("Wiki Git source", () => {
     expect(existsSync(join(f.repo, "docs/a/README.md"))).toBe(true);
   });
 
+  it("syncs without AI, publishes selected batches, preserves unselected knowledge and only cleans confirmed deletions", async () => {
+    const f = await fixture();
+    expect(f.service.syncDocuments("service", "team", f.wikiId).kind).toBe("ok");
+    await f.service.onIdle(f.wikiId);
+    expect(extracted).toEqual([]);
+    expect(f.current().active_version).toBeNull();
+    expect(f.service.documents("service", f.wikiId)).toMatchObject({ total: 2, completed: 0 });
+    const analyze = async (filenames: string[], deleted_filenames: string[] = [], force = false) => {
+      expect(f.service.analyzeSelected("service", "team", f.wikiId, { filenames, deleted_filenames, force }).kind).toBe("ok");
+      await f.service.onIdle(f.wikiId);
+      expect(f.current().ingest_status, f.current().sync_error ?? "").toBe("idle");
+    };
+    await analyze(["a/README.md"]);
+    expect(extracted).toEqual(["a/README.md"]);
+    expect(f.service.documents("service", f.wikiId)).toMatchObject({ total: 2, completed: 1 });
+    expect(f.service.documents("service", f.wikiId)?.items.find((file) => file.filename === "b/README.md")?.status).toBe("pending");
+    extracted.length = 0;
+    await analyze(["b/README.md"]);
+    expect(extracted).toEqual(["b/README.md"]);
+    expect(f.service.documents("service", f.wikiId)?.completed).toBe(2);
+    expect(f.manager.getPages(f.wikiId).some((page) => page.title === "a/README.md")).toBe(true);
+    const version = f.current().version;
+    extracted.length = 0;
+    await analyze(["a/README.md"]);
+    expect(extracted).toEqual([]);
+    expect(f.current().version).toBe(version);
+    await analyze(["a/README.md"], [], true);
+    expect(extracted).toEqual(["a/README.md"]);
+
+    f.put("docs/b/README.md", "changed b");
+    rmSync(join(f.repo, "docs/a/README.md"));
+    await f.commit();
+    f.service.syncDocuments("service", "team", f.wikiId);
+    await f.service.onIdle(f.wikiId);
+    expect(f.service.documents("service", f.wikiId)?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ filename: "a/README.md", status: "deleted" }),
+      expect.objectContaining({ filename: "b/README.md", status: "changed" }),
+    ]));
+    await analyze(["b/README.md"]);
+    expect(f.manager.getPages(f.wikiId).some((page) => page.title === "a/README.md")).toBe(true);
+    expect(f.service.documents("service", f.wikiId)?.deleted).toBe(1);
+    const beforeCleanup = f.current().active_version!;
+    extracted.length = 0;
+    await analyze([], ["a/README.md"]);
+    expect(extracted).toEqual([]);
+    expect(f.manager.getPages(f.wikiId).some((page) => page.title === "a/README.md")).toBe(false);
+    expect(f.service.documents("service", f.wikiId)?.deleted).toBe(0);
+    expect(f.service.rollback("service", f.wikiId, beforeCleanup, f.current().active_version!).kind).toBe("ok");
+    expect(f.service.documents("service", f.wikiId)?.deleted).toBe(1);
+    expect(() => f.service.analyzeSelected("service", "team", f.wikiId, { filenames: ["../missing.md"] })).toThrow("invalid document path");
+    expect(() => f.service.analyzeSelected("service", "team", f.wikiId, { filenames: [], deleted_filenames: ["b/README.md"] })).toThrow("not pending deletion");
+  });
+
+  it("pins selected upload inputs before queue execution and never analyzes unselected uploads", async () => {
+    const f = await fixture();
+    const { row } = f.service.create({ service_id: "service", team_id: "team", name: "Upload selected" });
+    try {
+      f.service.rawWrite("service", "team", row.wiki_id, "a.md", "original A");
+      f.service.rawWrite("service", "team", row.wiki_id, "b.md", "original B");
+      expect(f.service.analyzeSelected("service", "team", row.wiki_id, { filenames: ["a.md"] }).kind).toBe("ok");
+      f.service.rawWrite("service", "team", row.wiki_id, "a.md", "newer A");
+      await f.service.onIdle(row.wiki_id);
+      expect(extracted).toEqual(["a.md"]);
+      const pages = f.manager.getPages(row.wiki_id);
+      expect(pages.find((page) => page.title === "a.md")?.content).toContain("original A");
+      expect(pages.some((page) => page.title === "b.md")).toBe(false);
+      expect(f.service.documents("service", row.wiki_id)?.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ filename: "a.md", status: "changed" }),
+        expect.objectContaining({ filename: "b.md", status: "pending" }),
+      ]));
+    } finally { evictWikiDb(row.wiki_id); }
+  });
+
+  it("retries a failed forced selection even when its published document is unchanged", async () => {
+    const f = await fixture();
+    await f.sync();
+    failingSources.add("a/README.md");
+    f.service.analyzeSelected("service", "team", f.wikiId, { filenames: ["a/README.md"], force: true });
+    await f.service.onIdle(f.wikiId);
+    expect(f.current().ingest_status).toBe("failed");
+    expect(f.service.documents("service", f.wikiId)?.items.find(file => file.filename === "a/README.md")?.status).toBe("failed");
+    f.service.syncDocuments("service", "team", f.wikiId);
+    await f.service.onIdle(f.wikiId);
+    expect(f.service.documents("service", f.wikiId)?.items.find(file => file.filename === "a/README.md")?.status).toBe("failed");
+    failingSources.clear();
+    extracted.length = 0;
+    f.service.analyzeSelected("service", "team", f.wikiId, { filenames: ["a/README.md"] });
+    await f.service.onIdle(f.wikiId);
+    expect(extracted).toEqual(["a/README.md"]);
+    expect(f.current().ingest_status).toBe("idle");
+    expect(f.service.documents("service", f.wikiId)?.completed).toBe(2);
+  });
+
+  it("validates selection APIs and isolates tenants without starting AI during sync", async () => {
+    const f = await fixture();
+    const app = createWikiRoutes({ wikiService: f.service, wikiMgr: f.manager, publicBaseUrl: "" });
+    const post = (path: string, body: object = {}, service = "service") => app.request(path, {
+      method: "POST", headers: { "content-type": "application/json", "x-tdai-service-id": service },
+      body: JSON.stringify({ wiki_id: f.wikiId, ...body }),
+    });
+    for (const path of ["/documents", "/analyze", "/sync-documents"]) {
+      expect((await post(path, {}, "foreign")).status).toBe(404);
+      expect((await post(path, {}, "")).status).toBe(400);
+    }
+    expect((await post("/sync-documents")).status).toBe(202);
+    await f.service.onIdle(f.wikiId);
+    expect(extracted).toEqual([]);
+    expect(f.service.listVersions("service", f.wikiId)).toEqual([]);
+    expect((await (await post("/documents")).json()).data).toMatchObject({ total: 2, completed: 0, deleted: 0 });
+    for (const body of [{}, { filenames: [] }, { filenames: [1] }, { filenames: ["../escape.md"] },
+      { filenames: ["a/README.md"], force: "yes" }, { filenames: [], deleted_filenames: ["a/README.md"] }]) {
+      expect((await post("/analyze", body)).status).toBe(400);
+    }
+    expect((await post("/analyze", { filenames: ["b/README.md"] })).status).toBe(202);
+    await f.service.onIdle(f.wikiId);
+    expect(extracted).toEqual(["b/README.md"]);
+    expect((await (await post("/get")).json()).data.document_summary).toEqual({ total: 2, completed: 1, deleted: 0 });
+  });
+
+  it("recovers interrupted document-only sync without enabling AI continuation", async () => {
+    const f = await fixture();
+    f.store.updateWikiStatus("service", f.wikiId, { status: "processing", ingest_status: "processing", internal_status: "syncing-documents" });
+    f.store.markInterruptedAsFailed();
+    expect(f.current()).toMatchObject({ status: "draft", ingest_status: "idle", internal_status: null,
+      sync_error: "document sync interrupted; sync documents again" });
+    expect(f.service.canResumeSelection("service", f.wikiId)).toBe(false);
+    expect(() => f.service.analyzeSelected("service", "team", f.wikiId, { filenames: ["a/README.md"] })).toThrow("sync documents again");
+    expect(extracted).toEqual([]);
+    f.service.syncDocuments("service", "team", f.wikiId);
+    await f.service.onIdle(f.wikiId);
+    expect(f.current().sync_error).toBeNull();
+    expect(extracted).toEqual([]);
+    f.put("docs/large.md", "x".repeat(5 * 1024 * 1024 + 1));
+    await f.commit();
+    f.service.syncDocuments("service", "team", f.wikiId);
+    await f.service.onIdle(f.wikiId);
+    expect(f.current()).toMatchObject({ status: "draft", ingest_status: "idle" });
+    expect(f.current().sync_error).toContain("document sync failed:");
+    expect(f.current().sync_error).toContain("large.md");
+    expect(f.service.canResumeSelection("service", f.wikiId)).toBe(false);
+    expect(extracted).toEqual([]);
+  });
+
   it("validates immutable source configuration without embedding credentials", () => {
     const config = { repo_url: "https://example.invalid/docs.git", branch: "main", docs_path: "./文档/章节/" };
     expect(normalizeWikiGitConfig(config).docs_path).toBe("文档/章节");
@@ -283,7 +432,7 @@ describe("Wiki Git source", () => {
   });
 
   it("pauses AI calls, survives service recreation, and resumes the pinned commit without repeating completed documents", async () => {
-    const f = await fixture();
+    const f = await fixture({ "docs/a/README.md": "alpha", "docs/b/README.md": "beta", "docs/c.md": "unselected" });
     const extract = vi.mocked(ingest.extractSource).getMockImplementation()!;
     let entered!: () => void;
     const waiting = new Promise<void>((resolve) => { entered = resolve; });
@@ -299,7 +448,9 @@ describe("Wiki Git source", () => {
       }
       return extract(...args);
     });
-    expect(f.service.sync("service", "team", f.wikiId).kind).toBe("ok");
+    expect(f.service.syncDocuments("service", "team", f.wikiId).kind).toBe("ok");
+    await f.service.onIdle(f.wikiId);
+    expect(f.service.analyzeSelected("service", "team", f.wikiId, { filenames: ["a/README.md", "b/README.md"] }).kind).toBe("ok");
     await waiting;
     await vi.waitFor(() => expect(f.service.analysisProgress("service", f.wikiId)?.completed).toBe(1));
     expect(f.service.pause("service", f.wikiId)).toMatchObject({ internal_status: "pausing" });
@@ -308,7 +459,11 @@ describe("Wiki Git source", () => {
     expect(f.service.listVersions("service", f.wikiId)?.[0].state).toBe("paused");
 
     f.put("docs/a/README.md", "remote changed while paused");
+    rmSync(join(f.repo, "docs/b/README.md"));
     const remoteCommit = await f.commit();
+    expect(f.service.syncDocuments("service", "team", f.wikiId).kind).toBe("ok");
+    await f.service.onIdle(f.wikiId);
+    expect(f.service.canResumeSelection("service", f.wikiId)).toBe(true);
     // 模拟重启：运行标记恢复为暂停，新服务和新引擎仅从磁盘检查点恢复。
     f.store.updateWikiStatus("service", f.wikiId, { status: "processing", ingest_status: "processing" });
     f.store.markInterruptedAsFailed();
@@ -318,7 +473,7 @@ describe("Wiki Git source", () => {
       worker: async (ctx) => {
         manager.init({ name: ctx.wikiId, path: ctx.dir });
         await manager.ingest(ctx.wikiId, {}, { version: ctx.version, gitSource: ctx.gitSource,
-          sourceBaseline: ctx.sourceBaseline, signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot, saveProgress: ctx.setProgress });
+          analysisScope: ctx.analysisScope, sourceBaseline: ctx.sourceBaseline, signal: ctx.signal, sourceSnapshot: ctx.sourceSnapshot, saveProgress: ctx.setProgress });
         return { pageCount: manager.getPages(ctx.wikiId).length };
       },
     });
@@ -328,10 +483,17 @@ describe("Wiki Git source", () => {
     expect(resumed.resume("service", "team", f.wikiId).kind).toBe("ok");
     await resumed.onIdle(f.wikiId);
     expect(extracted).toEqual(["b/README.md"]);
+    expect(f.service.documents("service", f.wikiId)?.items.find(file => file.filename === "c.md")?.status).toBe("pending");
+    expect(f.service.listVersions("service", f.wikiId)?.[0].analysis_scope?.filenames).toEqual(["a/README.md", "b/README.md"]);
     expect(f.current()).toMatchObject({ ingest_status: "idle", active_version: 2 });
     expect(f.metadata().commit_hash).toBe(f.firstCommit);
     expect(resumed.analysisProgress("service", f.wikiId)).toMatchObject({ completed: 2, cached: 1, percent: 100 });
-    expect(resumed.rawRead("service", "team", f.wikiId, "a/README.md")).toBe("alpha");
+    expect(resumed.rawRead("service", "team", f.wikiId, "a/README.md")).toBe("remote changed while paused");
+    expect(resumed.documents("service", f.wikiId)?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ filename: "b/README.md", status: "deleted" }),
+      expect.objectContaining({ filename: "a/README.md", status: "changed" }),
+    ]));
+    expect(manager.getPages(f.wikiId).find((page) => page.title === "a/README.md")?.content).toContain("alpha");
     expect(resumed.sync("service", "team", f.wikiId).kind).toBe("ok");
     await resumed.onIdle(f.wikiId);
     expect(f.metadata().commit_hash).toBe(remoteCommit);

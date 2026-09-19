@@ -613,6 +613,10 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
         ingestStatus: "failed", buildingVersion: null, internalStatus: null, syncError: reason, updatedAt: ts })
       .where(sql`ingest_status IN ('pending','processing') AND internal_status = 'publishing-manual-version'`)
       .run();
+    const documentSync = this.db.update(knowledgeWiki)
+      .set({ status: sql`CASE WHEN active_version IS NULL THEN 'draft' ELSE 'ready' END`, ingestStatus: "idle",
+        buildingVersion: null, internalStatus: null, syncError: "document sync interrupted; sync documents again", updatedAt: ts })
+      .where(sql`ingest_status IN ('pending','processing') AND internal_status = 'syncing-documents'`).run();
     const bActive = this.db
       .update(knowledgeWiki)
       .set({ status: "ready", ingestStatus: "paused", buildingVersion: null, internalStatus: null, syncError: null, updatedAt: ts })
@@ -623,7 +627,7 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
       .set({ status: "draft", ingestStatus: "paused", buildingVersion: null, internalStatus: null, syncError: null, updatedAt: ts })
       .where(sql`(ingest_status IN ('pending','processing') OR status IN ('pending','processing')) AND active_version IS NULL`)
       .run();
-    return a.changes + manual.changes + bActive.changes + bInitial.changes;
+    return a.changes + manual.changes + documentSync.changes + bActive.changes + bInitial.changes;
   }
 
   /** All ready code-graphs (with service_id) so module.ts can rebuild per-tenant dirs. */
